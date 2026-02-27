@@ -82,9 +82,63 @@ metadata:
 | `emoji` | `string` | Display emoji for the skill. |
 | `homepage` | `string` | URL to the skill's homepage or docs. |
 | `os` | `string[]` | OS restrictions (e.g. `["macos"]`, `["linux"]`). |
+| `capabilities` | `string[] \| object \| object[]` | Capability declarations (`shell`, `filesystem`, `network`, `browser`, `sessions`, `messaging`, `scheduling`). |
 | `install` | `array` | Install specs for dependencies (see below). |
 | `nix` | `object` | Nix plugin spec (see README). |
 | `config` | `object` | Clawdbot config spec (see README). |
+| `cliHelp` | `string` | Optional CLI help text shown in skill details. |
+| `envVars` | `array` | Structured env var declarations (`name`, `required`, `description`). |
+| `dependencies` | `array` | Structured dependency declarations (`name`, `type`, optional metadata). |
+| `author` | `string` | Optional skill author string. |
+| `links` | `object` | Optional links (`homepage`, `repository`, `documentation`, `changelog`). |
+
+### Capabilities shape and normalization
+
+`metadata.openclaw.capabilities` supports flat and 2-layer shapes under the same key.
+
+Flat list:
+
+```yaml
+metadata:
+  openclaw:
+    capabilities: [shell, network, sessions]
+```
+
+2-layer object (constraints as key/value pairs):
+
+```yaml
+metadata:
+  openclaw:
+    capabilities:
+      shell:
+        mode: restricted
+        allow: [git, gh]
+      network:
+        web_search: true
+        web_fetch: true
+```
+
+Array-of-objects is also accepted:
+
+```yaml
+metadata:
+  openclaw:
+    capabilities:
+      - type: network.search
+        constraints:
+          provider: brave
+      - name: shell.exec
+        constraints:
+          mode: restricted
+```
+
+Aliases are normalized to canonicals at parse time:
+
+- `web_fetch`, `web_search`, `webfetch` -> `network`
+- `terminal`, `bash`, `exec` -> `shell`
+- `subagent`, `sessions_spawn` -> `sessions`
+- `message` -> `messaging`
+- `cron`, `schedule` -> `scheduling`
 
 ### Install specs
 
