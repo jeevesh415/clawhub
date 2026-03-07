@@ -207,6 +207,60 @@ describe('SkillsIndex', () => {
     })
   })
 
+  it('debounces search param updates while typing', async () => {
+    const actionFn = vi.fn().mockResolvedValue([])
+    convexReactMocks.useAction.mockReturnValue(actionFn)
+    vi.useFakeTimers()
+
+    render(<SkillsIndex />)
+
+    const input = screen.getByPlaceholderText('Filter by name, slug, or summary…')
+    fireEvent.change(input, { target: { value: 'r' } })
+    fireEvent.change(input, { target: { value: 're' } })
+    fireEvent.change(input, { target: { value: 'rem' } })
+
+    expect(navigateMock).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(219)
+    })
+    expect(navigateMock).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+
+    expect(navigateMock).toHaveBeenCalledTimes(1)
+    const call = navigateMock.mock.calls[0]?.[0] as {
+      replace?: boolean
+      search: (prev: Record<string, unknown>) => Record<string, unknown>
+    }
+    expect(call.replace).toBe(true)
+    expect(call.search({ sort: 'downloads' })).toEqual({ sort: 'downloads', q: 'rem' })
+  })
+
+  it('cancels pending debounced navigate when the url query changes externally', async () => {
+    const actionFn = vi.fn().mockResolvedValue([])
+    convexReactMocks.useAction.mockReturnValue(actionFn)
+    vi.useFakeTimers()
+
+    const { rerender } = render(<SkillsIndex />)
+
+    const input = screen.getByPlaceholderText('Filter by name, slug, or summary…')
+    fireEvent.change(input, { target: { value: 'rem' } })
+    expect(navigateMock).not.toHaveBeenCalled()
+
+    searchMock = { q: 'server' }
+    rerender(<SkillsIndex />)
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    expect(navigateMock).not.toHaveBeenCalled()
+    expect(screen.getByDisplayValue('server')).toBeTruthy()
+  })
+
   it('sorts search results by stars and breaks ties by updatedAt', async () => {
     searchMock = { q: 'remind', sort: 'stars', dir: 'desc' }
     const actionFn = vi

@@ -28,6 +28,8 @@
 - Search/listing performance: cut embedding hydration and badge read bandwidth via `embeddingSkillMap` + denormalized skill badges; shift stat-doc sync to low-frequency cron (#441) (thanks @sethconvex).
 
 ### Fixed
+- Skills/Web: debounce search URL updates on `/skills` to keep typing responsive, and cancel stale pending navigations on external query changes (#587) (thanks @neeravmakwana).
+- Upload: keep folder-picking enabled after page refresh by reapplying `webkitdirectory`/`directory` on the file input ref (#551) (thanks @MunemHashmi).
 - Skills hard-delete: delete `commentReports` rows during moderation cleanup to avoid orphaned report records.
 - Comments: hide entries authored by deleted/deactivated users in `comments:listBySkill`.
 - Admin API: `POST /api/v1/users/reclaim` now performs non-destructive root-slug owner transfer
