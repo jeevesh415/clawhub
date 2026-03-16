@@ -52,8 +52,8 @@ describe('SkillsIndex load-more observer', () => {
     convexHttpMock.query
       .mockResolvedValueOnce({
         page: [makeListResult('skill-0', 'Skill 0')],
-        isDone: false,
-        continueCursor: 'cursor-1',
+        hasMore: true,
+        nextCursor: 'cursor-1',
       })
       .mockImplementation(() => {
         loadMoreCallCount++

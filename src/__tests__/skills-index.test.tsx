@@ -58,7 +58,8 @@ describe('SkillsIndex', () => {
         dir: 'desc',
         highlightedOnly: false,
         nonSuspiciousOnly: false,
-        paginationOpts: { cursor: null, numItems: 25 },
+        cursor: undefined,
+        numItems: 25,
       }),
     )
   })
@@ -107,7 +108,7 @@ describe('SkillsIndex', () => {
     const listCalls = convexHttpMock.query.mock.calls.filter(
       (call: unknown[]) => {
         const args = call[1] as Record<string, unknown> | undefined
-        return args && 'paginationOpts' in args
+        return args && 'numItems' in args
       },
     )
     expect(listCalls).toHaveLength(0)
@@ -297,8 +298,8 @@ describe('SkillsIndex', () => {
     vi.stubGlobal('IntersectionObserver', undefined)
     convexHttpMock.query.mockResolvedValue({
       page: [makeListResult('skill-0', 'Skill 0')],
-      isDone: false,
-      continueCursor: 'cursor-1',
+      hasMore: true,
+      nextCursor: 'cursor-1',
     })
     render(<SkillsIndex />)
     await act(async () => {})
@@ -311,8 +312,8 @@ describe('SkillsIndex', () => {
     convexHttpMock.query
       .mockResolvedValueOnce({
         page: [makeListResult('skill-0', 'Skill 0')],
-        isDone: false,
-        continueCursor: 'cursor-1',
+        hasMore: true,
+        nextCursor: 'cursor-1',
       })
       // Second call (load more) never resolves
       .mockReturnValueOnce(new Promise(() => {}))

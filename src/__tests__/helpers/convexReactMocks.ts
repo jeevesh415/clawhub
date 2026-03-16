@@ -18,5 +18,5 @@ export function resetConvexReactMocks() {
 export function setupDefaultConvexReactMocks() {
   convexReactMocks.useAction.mockReturnValue(() => Promise.resolve([]))
   convexReactMocks.useQuery.mockReturnValue(null)
-  convexHttpMock.query.mockResolvedValue({ page: [], isDone: true, continueCursor: '' })
+  convexHttpMock.query.mockResolvedValue({ page: [], hasMore: false, nextCursor: null })
 }

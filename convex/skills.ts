@@ -1,6 +1,7 @@
 import { getAuthUserId } from '@convex-dev/auth/server'
+import { getPage, type IndexKey } from 'convex-helpers/server/pagination'
 import { paginationOptsValidator } from 'convex/server'
-import { ConvexError, v } from 'convex/values'
+import { ConvexError, v, type Value } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server'
 import { internal } from './_generated/api'
@@ -37,10 +38,6 @@ import {
   isPublicSkillDoc,
   readGlobalPublicSkillsCount,
 } from './lib/globalStats'
-import {
-  TRENDING_LEADERBOARD_KIND,
-  TRENDING_NON_SUSPICIOUS_LEADERBOARD_KIND,
-} from './lib/leaderboards'
 import {
   applyManualOverrideToSkillPatch,
   isManualOverrideReason,
@@ -332,6 +329,22 @@ const NONSUSPICIOUS_SORT_INDEXES = {
   stars: 'by_nonsuspicious_stars',
   installs: 'by_nonsuspicious_installs',
 } as const
+
+// Index fields for getPage (avoids importing schema.ts which pulls in auth deps)
+const DIGEST_INDEX_FIELDS: Record<string, string[]> = {
+  by_active_created: ['softDeletedAt', 'createdAt'],
+  by_active_updated: ['softDeletedAt', 'updatedAt'],
+  by_active_name: ['softDeletedAt', 'displayName'],
+  by_active_stats_downloads: ['softDeletedAt', 'statsDownloads', 'updatedAt'],
+  by_active_stats_stars: ['softDeletedAt', 'statsStars', 'updatedAt'],
+  by_active_stats_installs_all_time: ['softDeletedAt', 'statsInstallsAllTime', 'updatedAt'],
+  by_nonsuspicious_created: ['softDeletedAt', 'isSuspicious', 'createdAt'],
+  by_nonsuspicious_updated: ['softDeletedAt', 'isSuspicious', 'updatedAt'],
+  by_nonsuspicious_name: ['softDeletedAt', 'isSuspicious', 'displayName'],
+  by_nonsuspicious_downloads: ['softDeletedAt', 'isSuspicious', 'statsDownloads', 'updatedAt'],
+  by_nonsuspicious_stars: ['softDeletedAt', 'isSuspicious', 'statsStars', 'updatedAt'],
+  by_nonsuspicious_installs: ['softDeletedAt', 'isSuspicious', 'statsInstallsAllTime', 'updatedAt'],
+}
 
 function isSkillVersionId(
   value: Id<'skillVersions'> | null | undefined,
@@ -2539,7 +2552,7 @@ export const report = mutation({
   },
 })
 
-// TODO: Delete listPublicPage once all clients have migrated to listPublicPageV2
+/** @deprecated V1 is gutted — returns empty results with no DB reads. */
 export const listPublicPage = query({
   args: {
     cursor: v.optional(v.string()),
@@ -2556,67 +2569,12 @@ export const listPublicPage = query({
       ),
     ),
   },
-  handler: async (ctx, args) => {
-    const sort = args.sort ?? 'updated'
-    const limit = clampInt(args.limit ?? 24, 1, MAX_PUBLIC_LIST_LIMIT)
-
-    if (sort === 'updated') {
-      const { page, isDone, continueCursor } = await ctx.db
-        .query('skills')
-        .withIndex('by_updated', (q) => q)
-        .order('desc')
-        .paginate({ cursor: args.cursor ?? null, numItems: limit })
-
-      const skills = page.filter((skill) => !skill.softDeletedAt)
-      const items = await buildPublicSkillEntries(
-        ctx,
-        filterPublicSkillPage(skills, { nonSuspiciousOnly: args.nonSuspiciousOnly }),
-      )
-
-      return { items, nextCursor: isDone ? null : continueCursor }
-    }
-
-    if (sort === 'trending') {
-      const entries = await getTrendingEntries(ctx, limit, {
-        nonSuspiciousOnly: args.nonSuspiciousOnly,
-      })
-      const skills: Doc<'skills'>[] = []
-
-      for (const entry of entries) {
-        const skill = await ctx.db.get(entry.skillId)
-        if (!skill || skill.softDeletedAt) continue
-        if (args.nonSuspiciousOnly && isSkillSuspicious(skill)) continue
-        skills.push(skill)
-        if (skills.length >= limit) break
-      }
-
-      const items = await buildPublicSkillEntries(ctx, skills)
-      return { items, nextCursor: null }
-    }
-
-    const index = sortToIndex(sort)
-    const { page, isDone, continueCursor } = await ctx.db
-      .query('skills')
-      .withIndex(index, (q) => q)
-      .order('desc')
-      .paginate({ cursor: args.cursor ?? null, numItems: limit })
-
-    const filtered = filterPublicSkillPage(
-      page.filter((skill) => !skill.softDeletedAt),
-      { nonSuspiciousOnly: args.nonSuspiciousOnly },
-    )
-    const items = await buildPublicSkillEntries(ctx, filtered)
-    return { items, nextCursor: isDone ? null : continueCursor }
+  handler: async () => {
+    return { items: [], nextCursor: null }
   },
 })
 
-/**
- * V2 of listPublicPage using standard Convex pagination (paginate + usePaginatedQuery).
- *
- * Key differences from V1:
- * - Uses `by_active_updated` index to filter soft-deleted skills at query level
- * - Returns standard pagination shape compatible with usePaginatedQuery
- */
+/** @deprecated V2 is gutted — returns empty results with no DB reads. */
 export const listPublicPageV2 = query({
   args: {
     paginationOpts: paginationOptsValidator,
@@ -2634,83 +2592,12 @@ export const listPublicPageV2 = query({
     highlightedOnly: v.optional(v.boolean()),
     nonSuspiciousOnly: v.optional(v.boolean()),
   },
-  handler: async (ctx, args) => {
-    const sort = args.sort ?? 'newest'
-    const dir = args.dir ?? (sort === 'name' ? 'asc' : 'desc')
-    const { numItems, cursor: initialCursor } = normalizePublicListPagination(
-      args.paginationOpts,
-    )
-
-    const runPaginateBase = (cursor: string | null) =>
-      ctx.db
-        .query('skillSearchDigest')
-        .withIndex(SORT_INDEXES[sort], (q) => q.eq('softDeletedAt', undefined))
-        .order(dir)
-        .paginate({ cursor, numItems })
-
-    const runPaginateCompound = (cursor: string | null) =>
-      ctx.db
-        .query('skillSearchDigest')
-        .withIndex(NONSUSPICIOUS_SORT_INDEXES[sort], (q) =>
-          q.eq('softDeletedAt', undefined).eq('isSuspicious', false),
-        )
-        .order(dir)
-        .paginate({ cursor, numItems })
-
-    // Use the lightweight skillSearchDigest table (~800 bytes/row vs ~1.9KB)
-    // to avoid Bytes Read Limit errors on the full skills table.
-    let result = await paginateWithStaleCursorRecovery(
-      args.nonSuspiciousOnly ? runPaginateCompound : runPaginateBase,
-      initialCursor,
-    )
-
-    // Safety: if the compound index returns zero results on the first page,
-    // isSuspicious may not be backfilled yet. Fall back to the base index
-    // with JS filtering so the homepage isn't empty during migration.
-    if (
-      args.nonSuspiciousOnly &&
-      initialCursor === null &&
-      result.page.length === 0 &&
-      !result.isDone
-    ) {
-      result = await paginateWithStaleCursorRecovery(runPaginateBase, null)
-    }
-    // highlightedOnly is still filtered in JS (rare enough that empty pages are unlikely)
-    const filteredPage = filterPublicSkillPage(
-      result.page.map(digestToHydratableSkill),
-      args,
-    )
-
-    // Build response directly from digest — no extra table reads.
-    // This keeps the query's read set to skillSearchDigest only, so writes
-    // to skills/users/skillVersions never invalidate the cache.
-    const filteredMap = new Map(filteredPage.map((s) => [s._id, s]))
-    const items: PublicSkillEntry[] = []
-    for (const digest of result.page) {
-      const hydratable = filteredMap.get(digest.skillId)
-      if (!hydratable) continue
-      const publicSkill = toPublicSkill(hydratable)
-      if (!publicSkill) continue
-      const ownerInfo = digestToOwnerInfo(digest)
-      if (!ownerInfo?.owner) continue
-      const latestVersion = digest.latestVersionSummary
-        ? toPublicSkillListVersionFromSummary(
-            digest.latestVersionSummary,
-            digest.latestVersionId,
-          )
-        : null
-      items.push({
-        skill: publicSkill,
-        latestVersion,
-        ownerHandle: ownerInfo.ownerHandle,
-        owner: ownerInfo.owner,
-      })
-    }
-    return { ...result, page: items }
+  handler: async () => {
+    return { page: [], isDone: true, continueCursor: '' }
   },
 })
 
-/** Identical to listPublicPageV2 — used to distinguish new client traffic from stale tabs. */
+/** V3 — kept intact for remaining subscribers during migration to V4. */
 export const listPublicPageV3 = query({
   args: {
     paginationOpts: paginationOptsValidator,
@@ -2796,6 +2683,154 @@ export const listPublicPageV3 = query({
   },
 })
 
+function encodeIndexKey(key: IndexKey): string {
+  return JSON.stringify(key.map((val) => (val === undefined ? { __undef: 1 } : val)))
+}
+function decodeIndexKey(cursor: string): IndexKey | null {
+  try {
+    const arr = JSON.parse(cursor) as unknown[]
+    if (!Array.isArray(arr)) return null
+    return arr.map((val) =>
+      val !== null && typeof val === 'object' && '__undef' in (val as Record<string, unknown>)
+        ? undefined
+        : (val as Value),
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
+ * V4 of listPublicPage using convex-helpers `getPage()` for deterministic,
+ * cacheable cursors. Two users requesting the same page produce identical
+ * query args, enabling shared query caching across all users.
+ */
+export const listPublicPageV4 = query({
+  args: {
+    cursor: v.optional(v.string()),
+    numItems: v.optional(v.number()),
+    sort: v.optional(
+      v.union(
+        v.literal('newest'),
+        v.literal('updated'),
+        v.literal('downloads'),
+        v.literal('installs'),
+        v.literal('stars'),
+        v.literal('name'),
+      ),
+    ),
+    dir: v.optional(v.union(v.literal('asc'), v.literal('desc'))),
+    highlightedOnly: v.optional(v.boolean()),
+    nonSuspiciousOnly: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const sort = args.sort ?? 'newest'
+    const dir = args.dir ?? (sort === 'name' ? 'asc' : 'desc')
+    const numItems = clampInt(args.numItems ?? 25, 1, MAX_PUBLIC_LIST_LIMIT)
+
+    const indexName = args.nonSuspiciousOnly
+      ? NONSUSPICIOUS_SORT_INDEXES[sort]
+      : SORT_INDEXES[sort]
+
+    // Equality prefix constrains getPage to active (non-deleted) rows.
+    // Without this, getPage walks the entire index including soft-deleted items.
+    const eqPrefix: IndexKey = args.nonSuspiciousOnly
+      ? [undefined, false]
+      : [undefined]
+
+    const decodedCursor = args.cursor ? decodeIndexKey(args.cursor) : null
+    const isFirstPage = !decodedCursor
+    const startIndexKey: IndexKey = decodedCursor ?? eqPrefix
+
+    // For highlightedOnly, over-fetch since it's a JS filter
+    const fetchSize = args.highlightedOnly ? numItems * 2 : numItems
+
+    // Track (digest, indexKey) pairs through filtering
+    type DigestWithKey = { digest: Doc<'skillSearchDigest'>; indexKey: IndexKey }
+    const accepted: DigestWithKey[] = []
+    let hasMore = false
+    let lastFetchKey = startIndexKey
+    let lastFetchInclusive = isFirstPage
+
+    // Fetch up to 2 rounds (second only needed for highlightedOnly under-fill)
+    for (let round = 0; round < 2; round++) {
+      const result = await getPage(ctx, {
+        table: 'skillSearchDigest',
+        startIndexKey: lastFetchKey,
+        startInclusive: lastFetchInclusive,
+        endIndexKey: eqPrefix,
+        endInclusive: true,
+        targetMaxRows: fetchSize,
+        order: dir,
+        index: indexName,
+        indexFields: DIGEST_INDEX_FIELDS[indexName],
+      })
+
+      // Pair digests with their index keys, then filter
+      const hydratables = result.page.map(digestToHydratableSkill)
+      const filtered = filterPublicSkillPage(hydratables, args)
+      const filteredIds = new Set(filtered.map((s) => s._id))
+
+      for (let i = 0; i < result.page.length; i++) {
+        if (filteredIds.has(result.page[i].skillId)) {
+          accepted.push({ digest: result.page[i], indexKey: result.indexKeys[i] })
+        }
+      }
+
+      hasMore = result.hasMore
+
+      // If we have enough items or no more data, stop
+      if (accepted.length >= numItems || !result.hasMore) break
+
+      // Only re-fetch for highlightedOnly (JS filter can shrink results)
+      if (!args.highlightedOnly) break
+
+      lastFetchKey = result.indexKeys[result.indexKeys.length - 1]
+      lastFetchInclusive = false
+    }
+
+    // Trim to requested size
+    const trimmed = accepted.slice(0, numItems)
+    const finalHasMore = trimmed.length < accepted.length || hasMore
+
+    // Build PublicSkillEntry[] from accepted digests
+    const items: PublicSkillEntry[] = []
+    for (const { digest } of trimmed) {
+      const hydratable = digestToHydratableSkill(digest)
+      const publicSkill = toPublicSkill(hydratable)
+      if (!publicSkill) continue
+      const ownerInfo = digestToOwnerInfo(digest)
+      if (!ownerInfo?.owner) continue
+      const latestVersion = digest.latestVersionSummary
+        ? toPublicSkillListVersionFromSummary(
+            digest.latestVersionSummary,
+            digest.latestVersionId,
+          )
+        : null
+      items.push({
+        skill: publicSkill,
+        latestVersion,
+        ownerHandle: ownerInfo.ownerHandle,
+        owner: ownerInfo.owner,
+      })
+    }
+
+    // Encode cursor from the last accepted item's index key.
+    // If no items were accepted but hasMore is true, advance the cursor
+    // to the last fetched position so the next call doesn't restart.
+    let nextCursor: string | null = null
+    if (finalHasMore) {
+      if (trimmed.length > 0) {
+        nextCursor = encodeIndexKey(trimmed[trimmed.length - 1].indexKey)
+      } else if (lastFetchKey && lastFetchKey.length > 0) {
+        nextCursor = encodeIndexKey(lastFetchKey)
+      }
+    }
+
+    return { page: items, hasMore: finalHasMore, nextCursor }
+  },
+})
+
 function filterPublicSkillPage(
   page: HydratableSkill[],
   args: { highlightedOnly?: boolean; nonSuspiciousOnly?: boolean },
@@ -2855,51 +2890,6 @@ export const countPublicSkills = query({
     return countPublicSkillsForGlobalStats(ctx)
   },
 })
-
-function sortToIndex(
-  sort: 'downloads' | 'stars' | 'installsCurrent' | 'installsAllTime',
-):
-  | 'by_stats_downloads'
-  | 'by_stats_stars'
-  | 'by_stats_installs_current'
-  | 'by_stats_installs_all_time' {
-  switch (sort) {
-    case 'downloads':
-      return 'by_stats_downloads'
-    case 'stars':
-      return 'by_stats_stars'
-    case 'installsCurrent':
-      return 'by_stats_installs_current'
-    case 'installsAllTime':
-      return 'by_stats_installs_all_time'
-  }
-}
-
-async function getTrendingEntries(
-  ctx: QueryCtx,
-  limit: number,
-  args?: { nonSuspiciousOnly?: boolean },
-) {
-  const kind = args?.nonSuspiciousOnly
-    ? TRENDING_NON_SUSPICIOUS_LEADERBOARD_KIND
-    : TRENDING_LEADERBOARD_KIND
-  // Use the pre-computed leaderboard from the hourly cron job.
-  // Avoid Date.now() here to keep the query deterministic and cacheable.
-  const latest = await ctx.db
-    .query('skillLeaderboards')
-    .withIndex('by_kind', (q) => q.eq('kind', kind))
-    .order('desc')
-    .take(1)
-
-  if (latest[0]) {
-    return latest[0].items.slice(0, limit)
-  }
-
-  // Trending leaderboard generation has to happen through the action/query/mutation
-  // pipeline so each day is read in its own transaction. Returning an empty list on
-  // cold start is safer than rebuilding inside this query and tripping the 32K read cap.
-  return []
-}
 
 export const listVersions = query({
   args: { skillId: v.id('skills'), limit: v.optional(v.number()) },

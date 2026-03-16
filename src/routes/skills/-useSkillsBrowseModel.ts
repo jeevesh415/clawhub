@@ -70,8 +70,9 @@ export function useSkillsBrowseModel({
   const fetchPage = useCallback(
     async (cursor: string | null, generation: number) => {
       try {
-        const result = await convexHttp.query(api.skills.listPublicPageV3, {
-          paginationOpts: { cursor, numItems: pageSize },
+        const result = await convexHttp.query(api.skills.listPublicPageV4, {
+          cursor: cursor ?? undefined,
+          numItems: pageSize,
           sort: listSort,
           dir,
           highlightedOnly,
@@ -79,8 +80,8 @@ export function useSkillsBrowseModel({
         })
         if (generation !== fetchGeneration.current) return
         setListResults((prev) => (cursor ? [...prev, ...result.page] : result.page))
-        setListCursor(result.isDone ? null : result.continueCursor)
-        setListStatus(result.isDone ? 'done' : 'idle')
+        setListCursor(!result.hasMore ? null : result.nextCursor)
+        setListStatus(!result.hasMore ? 'done' : 'idle')
       } catch (err) {
         if (generation !== fetchGeneration.current) return
         console.error('Failed to fetch skills page:', err)
