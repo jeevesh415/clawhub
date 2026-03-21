@@ -2279,6 +2279,50 @@ describe("httpApiV1 handlers", () => {
     );
   });
 
+  it("treats /packages/search without q as a package detail route", async () => {
+    const runMutation = vi.fn().mockResolvedValue(okRate());
+    const runQuery = vi.fn(async (_query: unknown, args: Record<string, unknown>) => {
+      if ("name" in args) {
+        return {
+          package: {
+            _id: "packages:search",
+            name: "search",
+            displayName: "Search Package",
+            family: "code-plugin",
+            tags: {},
+            latestReleaseId: null,
+            channel: "community",
+            isOfficial: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          latestRelease: null,
+          owner: null,
+        };
+      }
+      return [];
+    });
+
+    const response = await __handlers.packagesGetRouterV1Handler(
+      makeCtx({ runQuery, runMutation }),
+      new Request("https://example.com/api/v1/packages/search"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runQuery).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        name: "search",
+      }),
+    );
+    expect(runQuery).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        query: expect.any(String),
+      }),
+    );
+  });
+
   it("package download uses download rate limiting", async () => {
     const runMutation = vi.fn().mockResolvedValue(okRate());
     const runQuery = vi.fn(async (_query: unknown, args: Record<string, unknown>) => {
@@ -2384,6 +2428,61 @@ describe("httpApiV1 handlers", () => {
       expect.objectContaining({
         key: "user:users:1",
         limit: 120,
+      }),
+    );
+  });
+
+  it("multipart package publish ignores macOS junk files", async () => {
+    vi.mocked(getOptionalApiTokenUserId).mockResolvedValue("users:1" as never);
+    vi.mocked(requireApiTokenUser).mockResolvedValue({
+      userId: "users:1",
+      user: { _id: "users:1", handle: "p" },
+    } as never);
+    const runMutation = vi.fn().mockResolvedValue(okRate());
+    const runAction = vi.fn().mockResolvedValue({ ok: true, packageId: "pkg:1", releaseId: "rel:1" });
+    const form = new FormData();
+    form.set(
+      "payload",
+      JSON.stringify({
+        name: "demo-plugin",
+        family: "bundle-plugin",
+        version: "1.0.0",
+        changelog: "init",
+        bundle: { hostTargets: ["desktop"] },
+      }),
+    );
+    form.append("files", new File(["{}"], ".DS_Store", { type: "application/octet-stream" }));
+    form.append(
+      "files",
+      new File(["{}"], "openclaw.bundle.json", { type: "application/json" }),
+    );
+
+    const response = await __handlers.publishPackageV1Handler(
+      makeCtx({
+        runAction,
+        runMutation,
+        storage: {
+          store: vi.fn(async (entry: File) => `storage:${entry.name}`),
+        },
+      }),
+      new Request("https://example.com/api/v1/packages", {
+        method: "POST",
+        headers: { Authorization: "Bearer clh_test" },
+        body: form,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runAction).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          files: [
+            expect.objectContaining({
+              path: "openclaw.bundle.json",
+            }),
+          ],
+        }),
       }),
     );
   });

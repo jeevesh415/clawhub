@@ -285,6 +285,7 @@ export const listVersions = query({
     return await ctx.db
       .query("packageReleases")
       .withIndex("by_package", (q) => q.eq("packageId", pkg._id))
+      .filter((q) => q.eq(q.field("softDeletedAt"), undefined))
       .order("desc")
       .paginate(args.paginationOpts);
   },
@@ -353,11 +354,7 @@ export const listPublicPage = query({
       for (const digest of page.page) {
         if (digest.channel === "private") continue;
         if (channel && digest.channel !== channel) continue;
-        if (
-          typeof isOfficial === "boolean" &&
-          !(family && channel) &&
-          digest.isOfficial !== isOfficial
-        ) {
+        if (typeof isOfficial === "boolean" && digest.isOfficial !== isOfficial) {
           continue;
         }
         if (!digestMatchesFilters(digest, args)) continue;
@@ -637,8 +634,15 @@ export const insertReleaseInternal = internalMutation({
     if (args.channel === "official" && !owner.trustedPublisher) {
       throw new ConvexError("Only trusted publishers may publish to the official channel");
     }
-
     const existing = await getPackageByNormalizedName(ctx, normalizedName);
+    const nextChannel =
+      args.channel ??
+      (existing?.channel === "private"
+        ? "private"
+        : owner.trustedPublisher
+          ? "official"
+          : "community");
+    const nextIsOfficial = nextChannel === "official";
     if (existing && existing.ownerUserId !== args.userId) {
       throw new ConvexError("Package already exists and belongs to another user");
     }
@@ -666,8 +670,8 @@ export const insertReleaseInternal = internalMutation({
         summary: args.summary,
         ownerUserId: args.userId,
         family: args.family,
-        channel: args.channel ?? (owner.trustedPublisher ? "official" : "community"),
-        isOfficial: Boolean(owner.trustedPublisher),
+        channel: nextChannel,
+        isOfficial: nextIsOfficial,
         runtimeId: args.runtimeId,
         sourceRepo: args.sourceRepo,
         tags: {},
@@ -719,7 +723,8 @@ export const insertReleaseInternal = internalMutation({
       summary: args.summary,
       sourceRepo: args.sourceRepo,
       runtimeId: args.runtimeId,
-      channel: args.channel ?? pkg.channel,
+      channel: nextChannel,
+      isOfficial: nextIsOfficial,
       latestReleaseId: shouldPromoteLatest ? releaseId : pkg.latestReleaseId,
       latestVersionSummary: shouldPromoteLatest
         ? {
@@ -732,11 +737,14 @@ export const insertReleaseInternal = internalMutation({
           }
         : pkg.latestVersionSummary,
       tags: nextTags,
-      capabilityTags: args.capabilities?.capabilityTags ?? pkg.capabilityTags,
-      executesCode:
-        typeof args.capabilities?.executesCode === "boolean"
+      capabilityTags: shouldPromoteLatest
+        ? args.capabilities?.capabilityTags ?? pkg.capabilityTags
+        : pkg.capabilityTags,
+      executesCode: shouldPromoteLatest
+        ? typeof args.capabilities?.executesCode === "boolean"
           ? args.capabilities.executesCode
-          : pkg.executesCode,
+          : pkg.executesCode
+        : pkg.executesCode,
       compatibility: shouldPromoteLatest ? args.compatibility : pkg.compatibility,
       capabilities: shouldPromoteLatest ? args.capabilities : pkg.capabilities,
       verification: shouldPromoteLatest ? args.verification : pkg.verification,

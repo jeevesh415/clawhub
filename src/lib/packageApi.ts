@@ -139,13 +139,16 @@ export async function fetchPackageVersion(name: string, version: string) {
 }
 
 export async function fetchPackageReadme(name: string, version?: string | null) {
-  const url = packageApiUrl(`${ApiRoutes.packages}/${encodeURIComponent(name)}/file`);
-  url.searchParams.set("path", "README.md");
-  if (version) url.searchParams.set("version", version);
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: { Accept: "text/plain" },
-  });
-  if (!response.ok) return null;
-  return await response.text();
+  const variants = ["README.md", "readme.md", "README.mdx", "readme.mdx"];
+  for (const path of variants) {
+    const url = packageApiUrl(`${ApiRoutes.packages}/${encodeURIComponent(name)}/file`);
+    url.searchParams.set("path", path);
+    if (version) url.searchParams.set("version", version);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "text/plain" },
+    });
+    if (response.ok) return await response.text();
+  }
+  return null;
 }

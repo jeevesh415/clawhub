@@ -187,7 +187,13 @@ function makeDigestCtx(options: {
 }
 
 function makeInsertReleaseCtx(existing: Record<string, unknown> | null) {
+  const patch = vi.fn();
+  const insert = vi
+    .fn()
+    .mockResolvedValueOnce("packageReleases:new");
   return {
+    patch,
+    insert,
     db: {
       get: vi.fn(async (id: string) => {
         if (id === "users:owner") return { _id: id, trustedPublisher: false };
@@ -210,8 +216,8 @@ function makeInsertReleaseCtx(existing: Record<string, unknown> | null) {
         }
         throw new Error(`Unexpected table ${table}`);
       }),
-      insert: vi.fn(),
-      patch: vi.fn(),
+      insert,
+      patch,
       replace: vi.fn(),
       delete: vi.fn(),
       normalizeId: vi.fn(),
@@ -251,9 +257,18 @@ function makePackageCtx(options: {
             };
           }
           if (table === "packageReleases") {
+            const filteredVersionsPage = {
+              ...versionsPage,
+              page: versionsPage.page.filter((release) => release.softDeletedAt === undefined),
+            };
             return {
               withIndex: vi.fn((_indexName: string) => ({
                 unique: vi.fn().mockResolvedValue(versionRelease),
+                filter: vi.fn(() => ({
+                  order: vi.fn(() => ({
+                    paginate: vi.fn().mockResolvedValue(filteredVersionsPage),
+                  })),
+                })),
                 order: vi.fn(() => ({
                   paginate: vi.fn().mockResolvedValue(versionsPage),
                 })),
@@ -324,6 +339,38 @@ describe("packages public queries", () => {
     });
 
     expect(result.page.map((entry) => entry.name)).toEqual(["public-plugin"]);
+  });
+
+  it("applies isOfficial filtering even with family and channel set", async () => {
+    const { ctx } = makeDigestCtx({
+      pages: [
+        {
+          page: [
+            makeDigest("official-demo", {
+              family: "code-plugin",
+              channel: "community",
+              isOfficial: true,
+            }),
+            makeDigest("community-demo", {
+              family: "code-plugin",
+              channel: "community",
+              isOfficial: false,
+            }),
+          ],
+          isDone: true,
+          continueCursor: "",
+        },
+      ],
+    });
+
+    const result = await listPublicPageHandler(ctx, {
+      family: "code-plugin",
+      channel: "community",
+      isOfficial: true,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+
+    expect(result.page.map((entry) => entry.name)).toEqual(["official-demo"]);
   });
 
   it("filters private packages and capability flags in public search", async () => {
@@ -433,6 +480,26 @@ describe("packages public queries", () => {
     expect(version?.version.version).toBe("1.0.0");
   });
 
+  it("hides soft-deleted releases from public version lists", async () => {
+    const { ctx } = makePackageCtx({
+      versionsPage: {
+        page: [
+          makeReleaseDoc({ version: "1.1.0", softDeletedAt: 10 }),
+          makeReleaseDoc({ _id: "packageReleases:demo-2", version: "1.0.0" }),
+        ],
+        isDone: true,
+        continueCursor: "",
+      },
+    });
+
+    const result = await listVersionsHandler(ctx, {
+      name: "demo-plugin",
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+
+    expect(result.page.map((entry) => entry.version)).toEqual(["1.0.0"]);
+  });
+
   it("rejects family changes on an existing package name", async () => {
     const ctx = makeInsertReleaseCtx(makePackageDoc({ family: "bundle-plugin" }));
 
@@ -450,5 +517,75 @@ describe("packages public queries", () => {
         integritySha256: "abc123",
       }),
     ).rejects.toThrow("family changes are not allowed");
+  });
+
+  it("promotes existing packages to official when publisher becomes trusted", async () => {
+    const ctx = makeInsertReleaseCtx(
+      makePackageDoc({
+        channel: "community",
+        isOfficial: false,
+        stats: { downloads: 0, installs: 0, stars: 0, versions: 1 },
+      }),
+    );
+    ctx.db.get.mockImplementation(async (id: string) => {
+      if (id === "users:owner") return { _id: id, trustedPublisher: true };
+      return null;
+    });
+
+    await insertReleaseInternalHandler(ctx, {
+      userId: "users:owner",
+      name: "demo-plugin",
+      displayName: "Demo Plugin",
+      family: "code-plugin",
+      version: "1.1.0",
+      changelog: "promote",
+      tags: ["latest"],
+      summary: "demo",
+      files: [],
+      integritySha256: "abc123",
+      capabilities: { capabilityTags: ["tools"], executesCode: true },
+    });
+
+    expect(ctx.patch).toHaveBeenCalledWith(
+      "packages:demo",
+      expect.objectContaining({
+        channel: "official",
+        isOfficial: true,
+      }),
+    );
+  });
+
+  it("does not overwrite capability search fields for non-latest releases", async () => {
+    const ctx = makeInsertReleaseCtx(
+      makePackageDoc({
+        capabilityTags: ["channel:chat"],
+        executesCode: true,
+        tags: { latest: "packageReleases:demo-1" },
+        latestReleaseId: "packageReleases:demo-1",
+        stats: { downloads: 0, installs: 0, stars: 0, versions: 1 },
+      }),
+    );
+
+    await insertReleaseInternalHandler(ctx, {
+      userId: "users:owner",
+      name: "demo-plugin",
+      displayName: "Demo Plugin",
+      family: "code-plugin",
+      version: "0.9.9",
+      changelog: "branch patch",
+      tags: ["legacy"],
+      summary: "demo",
+      files: [],
+      integritySha256: "abc123",
+      capabilities: { capabilityTags: ["legacy"], executesCode: false },
+    });
+
+    expect(ctx.patch).toHaveBeenCalledWith(
+      "packages:demo",
+      expect.objectContaining({
+        capabilityTags: ["channel:chat"],
+        executesCode: true,
+      }),
+    );
   });
 });

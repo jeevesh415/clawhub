@@ -6,7 +6,7 @@ import { getOptionalApiTokenUserId } from "../lib/apiTokenAuth";
 import { corsHeaders, mergeHeaders } from "../lib/httpHeaders";
 import { applyRateLimit } from "../lib/httpRateLimit";
 import { buildDeterministicZip } from "../lib/skillZip";
-import { isTextFile } from "../lib/skills";
+import { isMacJunkPath, isTextFile } from "../lib/skills";
 import {
   MAX_RAW_FILE_BYTES,
   getPathSegments,
@@ -138,6 +138,7 @@ async function parseMultipartPackagePublish(ctx: ActionCtx, request: Request) {
   }> = [];
   for (const entry of form.getAll("files")) {
     if (typeof entry === "string") continue;
+    if (isMacJunkPath(entry.name)) continue;
     const buffer = new Uint8Array(await entry.arrayBuffer());
     const digest = await crypto.subtle.digest("SHA-256", buffer);
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -261,7 +262,7 @@ export async function packagesGetRouterV1Handler(ctx: ActionCtx, request: Reques
   const rate = await applyRateLimit(ctx, request, rateKind);
   if (!rate.ok) return rate.response;
 
-  if (segments[0] === "search") {
+  if (segments[0] === "search" && new URL(request.url).searchParams.has("q")) {
     const url = new URL(request.url);
     const queryText = url.searchParams.get("q")?.trim() ?? "";
     const limit = Math.max(1, Math.min(toOptionalNumber(url.searchParams.get("limit")) ?? 20, 100));

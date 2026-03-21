@@ -75,4 +75,37 @@ describe("buildPackageUploadEntries", () => {
 
     expect(uploaded[0]?.path).toBe("dist/index.js");
   });
+
+  it("strips the shared root for dropped folders without webkitRelativePath", async () => {
+    const uploaded = await buildPackageUploadEntries(
+      [
+        {
+          name: "demo-plugin/package.json",
+          size: 10,
+          type: "application/json",
+        },
+        {
+          name: "demo-plugin/openclaw.plugin.json",
+          size: 20,
+          type: "application/json",
+        },
+        {
+          name: "demo-plugin/dist/index.js",
+          size: 30,
+          type: "text/javascript",
+        },
+      ],
+      {
+        generateUploadUrl: async () => "upload-1",
+        hashFile: async () => "sha:1",
+        uploadFile: async () => "storage:1",
+      },
+    );
+
+    expect(uploaded.map((entry) => entry.path)).toEqual([
+      "package.json",
+      "openclaw.plugin.json",
+      "dist/index.js",
+    ]);
+  });
 });

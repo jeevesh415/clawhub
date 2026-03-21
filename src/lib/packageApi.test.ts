@@ -1,7 +1,7 @@
 /* @vitest-environment node */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchPackages } from "./packageApi";
+import { fetchPackageReadme, fetchPackages } from "./packageApi";
 
 describe("fetchPackages", () => {
   afterEach(() => {
@@ -36,5 +36,27 @@ describe("fetchPackages", () => {
     expect(url.searchParams.get("capabilityTag")).toBe("tools");
     expect(url.searchParams.get("limit")).toBe("12");
     expect(url.searchParams.get("isOfficial")).toBe("true");
+  });
+
+  it("falls back across supported README variants", async () => {
+    vi.stubEnv("VITE_CONVEX_URL", "https://registry.example");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
+      .mockResolvedValueOnce(new Response("lowercase readme", { status: 200 }));
+
+    const result = await fetchPackageReadme("demo-plugin", "1.0.0");
+
+    expect(result).toBe("lowercase readme");
+    const firstRequest = fetchMock.mock.calls[0]?.[0];
+    const secondRequest = fetchMock.mock.calls[1]?.[0];
+    if (typeof firstRequest !== "string" || typeof secondRequest !== "string") {
+      throw new Error("Expected fetch calls to use string URLs");
+    }
+    const first = new URL(firstRequest);
+    const second = new URL(secondRequest);
+    expect(first.searchParams.get("path")).toBe("README.md");
+    expect(second.searchParams.get("path")).toBe("readme.md");
+    expect(second.searchParams.get("version")).toBe("1.0.0");
   });
 });
