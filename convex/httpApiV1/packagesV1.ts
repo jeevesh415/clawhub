@@ -34,6 +34,8 @@ const apiRefs = api as unknown as {
 const internalRefs = internal as unknown as {
   packages: {
     getByNameForViewerInternal: unknown;
+    listPageForViewerInternal: unknown;
+    searchForViewerInternal: unknown;
     listVersionsForViewerInternal: unknown;
     getVersionByNameForViewerInternal: unknown;
     publishPackageForUserInternal: unknown;
@@ -62,6 +64,7 @@ type PackageListQueryArgs = {
   isOfficial?: boolean;
   executesCode?: boolean;
   capabilityTag?: string;
+  viewerUserId?: Id<"users">;
   paginationOpts: { cursor: string | null; numItems: number };
 };
 
@@ -405,6 +408,7 @@ async function listPackages(ctx: ActionCtx, request: Request, family?: PackageLi
   if (!rate.ok) return rate.response;
 
   const url = new URL(request.url);
+  const viewerUserId = (await getOptionalApiTokenUserId(ctx, request)) ?? (await getAuthUserId(ctx));
   const limit = Math.max(1, Math.min(toOptionalNumber(url.searchParams.get("limit")) ?? 25, 100));
   const cursor = url.searchParams.get("cursor");
   const familyRaw = url.searchParams.get("family");
@@ -458,11 +462,12 @@ async function listPackages(ctx: ActionCtx, request: Request, family?: PackageLi
             page: CatalogListItem[];
             isDone: boolean;
             continueCursor: string | null;
-          }>(ctx, apiRefs.packages.listPublicPage, {
+          }>(ctx, internalRefs.packages.listPageForViewerInternal, {
             channel,
             isOfficial,
             executesCode,
             capabilityTag,
+            viewerUserId: viewerUserId ?? undefined,
             paginationOpts: { cursor: pageCursor, numItems },
           });
           return {
@@ -524,12 +529,13 @@ async function listPackages(ctx: ActionCtx, request: Request, family?: PackageLi
     page: unknown[];
     isDone: boolean;
     continueCursor: string | null;
-  }>(ctx, apiRefs.packages.listPublicPage, {
+  }>(ctx, internalRefs.packages.listPageForViewerInternal, {
     family: effectiveFamily,
     channel,
     isOfficial,
     executesCode,
     capabilityTag,
+    viewerUserId: viewerUserId ?? undefined,
     paginationOpts: { cursor, numItems: limit },
   } satisfies PackageListQueryArgs);
   return json(
@@ -687,6 +693,7 @@ export async function packagesGetRouterV1Handler(ctx: ActionCtx, request: Reques
 
   if (segments[0] === "search" && new URL(request.url).searchParams.has("q")) {
     const url = new URL(request.url);
+    const viewerUserId = (await getOptionalApiTokenUserId(ctx, request)) ?? (await getAuthUserId(ctx));
     const queryText = url.searchParams.get("q")?.trim() ?? "";
     const limit = Math.max(1, Math.min(toOptionalNumber(url.searchParams.get("limit")) ?? 20, 100));
     const familyRaw = url.searchParams.get("family");
@@ -718,7 +725,7 @@ export async function packagesGetRouterV1Handler(ctx: ActionCtx, request: Reques
         capabilityTag,
       });
     } else if (family) {
-      results = await runQueryRef<CatalogSearchEntry[]>(ctx, apiRefs.packages.searchPublic, {
+      results = await runQueryRef<CatalogSearchEntry[]>(ctx, internalRefs.packages.searchForViewerInternal, {
         query: queryText,
         limit,
         family,
@@ -726,16 +733,18 @@ export async function packagesGetRouterV1Handler(ctx: ActionCtx, request: Reques
         isOfficial,
         executesCode,
         capabilityTag,
+        viewerUserId: viewerUserId ?? undefined,
       });
     } else {
       const [packageResults, skillResults] = await Promise.all([
-        runQueryRef<CatalogSearchEntry[]>(ctx, apiRefs.packages.searchPublic, {
+        runQueryRef<CatalogSearchEntry[]>(ctx, internalRefs.packages.searchForViewerInternal, {
           query: queryText,
           limit,
           channel,
           isOfficial,
           executesCode,
           capabilityTag,
+          viewerUserId: viewerUserId ?? undefined,
         }),
         runQueryRef<CatalogSearchEntry[]>(ctx, apiRefs.skills.searchPackageCatalogPublic, {
           query: queryText,

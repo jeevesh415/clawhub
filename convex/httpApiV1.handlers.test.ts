@@ -2303,6 +2303,48 @@ describe("httpApiV1 handlers", () => {
     );
   });
 
+  it("packages list forwards viewerUserId for authenticated private package browsing", async () => {
+    vi.mocked(getAuthUserId).mockResolvedValue("users:owner" as never);
+    const runQuery = vi.fn().mockResolvedValue({ page: [], isDone: true, continueCursor: "" });
+    const runMutation = vi.fn().mockResolvedValue(okRate());
+
+    const response = await __handlers.listPackagesV1Handler(
+      makeCtx({ runQuery, runMutation }),
+      new Request("https://example.com/api/v1/packages?channel=private&limit=7"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runQuery).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        channel: "private",
+        viewerUserId: "users:owner",
+        paginationOpts: { cursor: null, numItems: 7 },
+      }),
+    );
+  });
+
+  it("packages search forwards viewerUserId for authenticated private package search", async () => {
+    vi.mocked(getAuthUserId).mockResolvedValue("users:owner" as never);
+    const runQuery = vi.fn().mockResolvedValue([]);
+    const runMutation = vi.fn().mockResolvedValue(okRate());
+
+    const response = await __handlers.packagesGetRouterV1Handler(
+      makeCtx({ runQuery, runMutation }),
+      new Request("https://example.com/api/v1/packages/search?q=secret&channel=private"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runQuery).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        query: "secret",
+        channel: "private",
+        viewerUserId: "users:owner",
+      }),
+    );
+  });
+
   it("packages detail falls back to public skills", async () => {
     const runQuery = vi.fn(async (_query: unknown, args: Record<string, unknown>) => {
       if ("name" in args) return null;

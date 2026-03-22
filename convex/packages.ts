@@ -72,6 +72,7 @@ type PackageDigestLike = Pick<
   | "runtimeId"
   | "channel"
   | "isOfficial"
+  | "ownerUserId"
   | "summary"
   | "ownerHandle"
   | "createdAt"
@@ -615,92 +616,127 @@ export const listPublicPage = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
-    if (args.channel === "private") {
-      return { page: [], isDone: true, continueCursor: "" };
-    }
-    const targetCount = args.paginationOpts.numItems;
-    const collected: PublicPackageListItem[] = [];
-    const decodedCursor = decodePublicPageCursor(args.paginationOpts.cursor);
-    let cursor = decodedCursor.cursor;
-    let offset = decodedCursor.offset;
-    let pageSize = decodedCursor.pageSize;
-    let done = decodedCursor.done;
-    let loops = 0;
-    let remainingScanBudget = MAX_PACKAGE_SCAN_DOCUMENTS;
-    const family = args.family;
-    const channel = args.channel;
-    const isOfficial = args.isOfficial;
-
-    while (
-      (offset > 0 || !done) &&
-      collected.length < targetCount &&
-      loops < MAX_PUBLIC_LIST_SCAN_PAGES &&
-      remainingScanBudget > 0
-    ) {
-      loops += 1;
-      const effectivePageSize = Math.min(
-        remainingScanBudget,
-        offset > 0 && pageSize ? Math.max(pageSize, offset + 1) : Math.max(targetCount * 3, targetCount),
-      );
-      if (effectivePageSize <= 0) break;
-      remainingScanBudget -= effectivePageSize;
-      const pageCursor = cursor;
-      const builder = args.capabilityTag
-        ? buildPackageCapabilityDigestQuery(ctx, {
-            capabilityTag: args.capabilityTag,
-            family,
-            channel,
-            isOfficial,
-            executesCode: args.executesCode,
-          })
-        : buildPackageDigestQuery(ctx, { family, channel, isOfficial, executesCode: args.executesCode });
-      const page: {
-        page: PackageDigestLike[];
-        isDone: boolean;
-        continueCursor: string;
-      } = await builder.order("desc").paginate({ cursor: pageCursor, numItems: effectivePageSize });
-      for (let index = offset; index < page.page.length; index += 1) {
-        const digest = page.page[index] as PackageDigestLike;
-        if (digest.channel === "private") continue;
-        if (channel && digest.channel !== channel) continue;
-        if (typeof isOfficial === "boolean" && digest.isOfficial !== isOfficial) {
-          continue;
-        }
-        if (!digestMatchesFilters(digest, args)) continue;
-        collected.push(toPublicPackageListItem(digest));
-        if (collected.length >= targetCount) {
-          const nextOffset = index + 1;
-          if (nextOffset < page.page.length) {
-            cursor = pageCursor;
-            offset = nextOffset;
-            pageSize = effectivePageSize;
-            done = page.isDone;
-          } else {
-            cursor = page.continueCursor;
-            offset = 0;
-            pageSize = effectivePageSize;
-            done = page.isDone;
-          }
-          return {
-            page: collected,
-            isDone: done && offset === 0,
-            continueCursor: encodePublicPageCursor({ cursor, offset, pageSize, done }),
-          };
-        }
-      }
-      done = page.isDone;
-      cursor = page.continueCursor;
-      offset = 0;
-      pageSize = effectivePageSize;
-    }
-
-    return {
-      page: collected,
-      isDone: done,
-      continueCursor: encodePublicPageCursor({ cursor, offset, pageSize, done }),
-    };
+    return await listPackagePageImpl(ctx, args);
   },
 });
+
+export const listPageForViewerInternal = internalQuery({
+  args: {
+    family: v.optional(
+      v.union(v.literal("skill"), v.literal("code-plugin"), v.literal("bundle-plugin")),
+    ),
+    channel: v.optional(v.union(v.literal("official"), v.literal("community"), v.literal("private"))),
+    isOfficial: v.optional(v.boolean()),
+    executesCode: v.optional(v.boolean()),
+    capabilityTag: v.optional(v.string()),
+    viewerUserId: v.optional(v.id("users")),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    return await listPackagePageImpl(ctx, args);
+  },
+});
+
+async function listPackagePageImpl(
+  ctx: DbReaderCtx,
+  args: {
+    family?: PackageFamily;
+    channel?: PackageChannel;
+    isOfficial?: boolean;
+    executesCode?: boolean;
+    capabilityTag?: string;
+    viewerUserId?: Id<"users">;
+    paginationOpts: { cursor: string | null; numItems: number };
+  },
+) {
+  if (args.channel === "private" && !args.viewerUserId) {
+    return { page: [], isDone: true, continueCursor: "" };
+  }
+  const viewerUserId = args.viewerUserId;
+  const canViewPackage = (digest: PackageDigestLike) =>
+    digest.channel !== "private" || digest.ownerUserId === viewerUserId;
+  const targetCount = args.paginationOpts.numItems;
+  const collected: PublicPackageListItem[] = [];
+  const decodedCursor = decodePublicPageCursor(args.paginationOpts.cursor);
+  let cursor = decodedCursor.cursor;
+  let offset = decodedCursor.offset;
+  let pageSize = decodedCursor.pageSize;
+  let done = decodedCursor.done;
+  let loops = 0;
+  let remainingScanBudget = MAX_PACKAGE_SCAN_DOCUMENTS;
+  const family = args.family;
+  const channel = args.channel;
+  const isOfficial = args.isOfficial;
+
+  while (
+    (offset > 0 || !done) &&
+    collected.length < targetCount &&
+    loops < MAX_PUBLIC_LIST_SCAN_PAGES &&
+    remainingScanBudget > 0
+  ) {
+    loops += 1;
+    const effectivePageSize = Math.min(
+      remainingScanBudget,
+      offset > 0 && pageSize ? Math.max(pageSize, offset + 1) : Math.max(targetCount * 3, targetCount),
+    );
+    if (effectivePageSize <= 0) break;
+    remainingScanBudget -= effectivePageSize;
+    const pageCursor = cursor;
+    const builder = args.capabilityTag
+      ? buildPackageCapabilityDigestQuery(ctx, {
+          capabilityTag: args.capabilityTag,
+          family,
+          channel,
+          isOfficial,
+          executesCode: args.executesCode,
+        })
+      : buildPackageDigestQuery(ctx, { family, channel, isOfficial, executesCode: args.executesCode });
+    const page: {
+      page: PackageDigestLike[];
+      isDone: boolean;
+      continueCursor: string;
+    } = await builder.order("desc").paginate({ cursor: pageCursor, numItems: effectivePageSize });
+    for (let index = offset; index < page.page.length; index += 1) {
+      const digest = page.page[index] as PackageDigestLike;
+      if (!canViewPackage(digest)) continue;
+      if (channel && digest.channel !== channel) continue;
+      if (typeof isOfficial === "boolean" && digest.isOfficial !== isOfficial) {
+        continue;
+      }
+      if (!digestMatchesFilters(digest, args)) continue;
+      collected.push(toPublicPackageListItem(digest));
+      if (collected.length >= targetCount) {
+        const nextOffset = index + 1;
+        if (nextOffset < page.page.length) {
+          cursor = pageCursor;
+          offset = nextOffset;
+          pageSize = effectivePageSize;
+          done = page.isDone;
+        } else {
+          cursor = page.continueCursor;
+          offset = 0;
+          pageSize = effectivePageSize;
+          done = page.isDone;
+        }
+        return {
+          page: collected,
+          isDone: done && offset === 0,
+          continueCursor: encodePublicPageCursor({ cursor, offset, pageSize, done }),
+        };
+      }
+    }
+    done = page.isDone;
+    cursor = page.continueCursor;
+    offset = 0;
+    pageSize = effectivePageSize;
+  }
+
+  return {
+    page: collected,
+    isDone: done,
+    continueCursor: encodePublicPageCursor({ cursor, offset, pageSize, done }),
+  };
+}
 
 export const searchPublic = query({
   args: {
@@ -715,71 +751,108 @@ export const searchPublic = query({
     capabilityTag: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const queryText = args.query.trim().toLowerCase();
-    if (!queryText) return [];
-    if (args.channel === "private") return [];
-    const targetCount = Math.max(1, Math.min(args.limit ?? 20, 100));
-    const builder = args.capabilityTag
-      ? buildPackageCapabilityDigestQuery(ctx, {
-          capabilityTag: args.capabilityTag,
-          family: args.family,
-          channel: args.channel,
-          isOfficial: args.isOfficial,
-          executesCode: args.executesCode,
-        })
-      : buildPackageDigestQuery(ctx, {
-          family: args.family,
-          channel: args.channel,
-          isOfficial: args.isOfficial,
-          executesCode: args.executesCode,
-        });
-    const matches: Array<{ score: number; package: PublicPackageListItem }> = [];
-    const seen = new Set<string>();
-    const pageSize = Math.min(MAX_SEARCH_PAGE_SIZE, Math.max(targetCount * 5, 50));
-    let cursor: string | null = null;
-    let done = false;
-    let loops = 0;
-    let remainingScanBudget = MAX_PACKAGE_SCAN_DOCUMENTS;
-
-    while (!done && loops < MAX_SEARCH_SCAN_PAGES && remainingScanBudget > 0) {
-      loops += 1;
-      const effectivePageSize = Math.min(pageSize, remainingScanBudget);
-      if (effectivePageSize <= 0) break;
-      remainingScanBudget -= effectivePageSize;
-      const page: {
-        page: PackageDigestLike[];
-        isDone: boolean;
-        continueCursor: string;
-      } = await builder.order("desc").paginate({ cursor, numItems: effectivePageSize });
-      for (const digest of page.page) {
-        if (digest.channel === "private") continue;
-        if (args.channel && digest.channel !== args.channel) continue;
-        if (typeof args.isOfficial === "boolean" && digest.isOfficial !== args.isOfficial) {
-          continue;
-        }
-        if (!digestMatchesFilters(digest, args)) continue;
-        const score = packageSearchScore(digest, queryText);
-        if (score <= 0 || seen.has(digest.packageId)) continue;
-        seen.add(digest.packageId);
-        matches.push({
-          score,
-          package: toPublicPackageListItem(digest),
-        });
-      }
-      done = page.isDone;
-      cursor = page.continueCursor;
-    }
-
-    return matches
-      .sort(
-        (a, b) =>
-          b.score - a.score ||
-          Number(b.package.isOfficial) - Number(a.package.isOfficial) ||
-          b.package.updatedAt - a.package.updatedAt,
-      )
-      .slice(0, targetCount);
+    return await searchPackagesImpl(ctx, args);
   },
 });
+
+export const searchForViewerInternal = internalQuery({
+  args: {
+    query: v.string(),
+    limit: v.optional(v.number()),
+    family: v.optional(
+      v.union(v.literal("skill"), v.literal("code-plugin"), v.literal("bundle-plugin")),
+    ),
+    channel: v.optional(v.union(v.literal("official"), v.literal("community"), v.literal("private"))),
+    isOfficial: v.optional(v.boolean()),
+    executesCode: v.optional(v.boolean()),
+    capabilityTag: v.optional(v.string()),
+    viewerUserId: v.optional(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+    return await searchPackagesImpl(ctx, args);
+  },
+});
+
+async function searchPackagesImpl(
+  ctx: DbReaderCtx,
+  args: {
+    query: string;
+    limit?: number;
+    family?: PackageFamily;
+    channel?: PackageChannel;
+    isOfficial?: boolean;
+    executesCode?: boolean;
+    capabilityTag?: string;
+    viewerUserId?: Id<"users">;
+  },
+) {
+  const queryText = args.query.trim().toLowerCase();
+  if (!queryText) return [];
+  if (args.channel === "private" && !args.viewerUserId) return [];
+  const targetCount = Math.max(1, Math.min(args.limit ?? 20, 100));
+  const viewerUserId = args.viewerUserId;
+  const canViewPackage = (digest: PackageDigestLike) =>
+    digest.channel !== "private" || digest.ownerUserId === viewerUserId;
+  const builder = args.capabilityTag
+    ? buildPackageCapabilityDigestQuery(ctx, {
+        capabilityTag: args.capabilityTag,
+        family: args.family,
+        channel: args.channel,
+        isOfficial: args.isOfficial,
+        executesCode: args.executesCode,
+      })
+    : buildPackageDigestQuery(ctx, {
+        family: args.family,
+        channel: args.channel,
+        isOfficial: args.isOfficial,
+        executesCode: args.executesCode,
+      });
+  const matches: Array<{ score: number; package: PublicPackageListItem }> = [];
+  const seen = new Set<string>();
+  const pageSize = Math.min(MAX_SEARCH_PAGE_SIZE, Math.max(targetCount * 5, 50));
+  let cursor: string | null = null;
+  let done = false;
+  let loops = 0;
+  let remainingScanBudget = MAX_PACKAGE_SCAN_DOCUMENTS;
+
+  while (!done && loops < MAX_SEARCH_SCAN_PAGES && remainingScanBudget > 0) {
+    loops += 1;
+    const effectivePageSize = Math.min(pageSize, remainingScanBudget);
+    if (effectivePageSize <= 0) break;
+    remainingScanBudget -= effectivePageSize;
+    const page: {
+      page: PackageDigestLike[];
+      isDone: boolean;
+      continueCursor: string;
+    } = await builder.order("desc").paginate({ cursor, numItems: effectivePageSize });
+    for (const digest of page.page) {
+      if (!canViewPackage(digest)) continue;
+      if (args.channel && digest.channel !== args.channel) continue;
+      if (typeof args.isOfficial === "boolean" && digest.isOfficial !== args.isOfficial) {
+        continue;
+      }
+      if (!digestMatchesFilters(digest, args)) continue;
+      const score = packageSearchScore(digest, queryText);
+      if (score <= 0 || seen.has(digest.packageId)) continue;
+      seen.add(digest.packageId);
+      matches.push({
+        score,
+        package: toPublicPackageListItem(digest),
+      });
+    }
+    done = page.isDone;
+    cursor = page.continueCursor;
+  }
+
+  return matches
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        Number(b.package.isOfficial) - Number(a.package.isOfficial) ||
+        b.package.updatedAt - a.package.updatedAt,
+    )
+    .slice(0, targetCount);
+}
 
 export const getPackageByNameInternal = internalQuery({
   args: { name: v.string() },

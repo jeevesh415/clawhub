@@ -9,7 +9,9 @@ import {
   getVersionByName,
   insertReleaseInternal,
   listPublicPage,
+  listPageForViewerInternal,
   listVersions,
+  searchForViewerInternal,
   searchPublic,
 } from "./packages";
 
@@ -44,6 +46,20 @@ const listPublicPageHandler = (
       isOfficial?: boolean;
       executesCode?: boolean;
       capabilityTag?: string;
+      paginationOpts: { cursor: string | null; numItems: number };
+    },
+    { page: Array<{ name: string }>; isDone: boolean; continueCursor: string }
+  >
+)._handler;
+const listPageForViewerInternalHandler = (
+  listPageForViewerInternal as unknown as WrappedHandler<
+    {
+      family?: "skill" | "code-plugin" | "bundle-plugin";
+      channel?: "official" | "community" | "private";
+      isOfficial?: boolean;
+      executesCode?: boolean;
+      capabilityTag?: string;
+      viewerUserId?: string;
       paginationOpts: { cursor: string | null; numItems: number };
     },
     { page: Array<{ name: string }>; isDone: boolean; continueCursor: string }
@@ -105,6 +121,21 @@ const searchPublicHandler = (
     Array<{ package: { name: string } }>
   >
 )._handler;
+const searchForViewerInternalHandler = (
+  searchForViewerInternal as unknown as WrappedHandler<
+    {
+      query: string;
+      limit?: number;
+      family?: "skill" | "code-plugin" | "bundle-plugin";
+      channel?: "official" | "community" | "private";
+      isOfficial?: boolean;
+      executesCode?: boolean;
+      capabilityTag?: string;
+      viewerUserId?: string;
+    },
+    Array<{ package: { name: string } }>
+  >
+)._handler;
 const publishPackageHandler = (
   publishPackage as unknown as WrappedHandler<
     {
@@ -143,6 +174,7 @@ function makeDigest(
     channel: "community",
     isOfficial: false,
     summary: `${name} summary`,
+    ownerUserId: "users:owner",
     ownerHandle: "owner",
     createdAt: 1,
     updatedAt: 1,
@@ -502,6 +534,61 @@ describe("packages public queries", () => {
     expect(result.page.map((entry) => entry.name)).toEqual(["public-plugin"]);
   });
 
+  it("allows owners to list their private packages", async () => {
+    const { ctx } = makeDigestCtx({
+      pages: [
+        {
+          page: [
+            makeDigest("secret-plugin", {
+              channel: "private",
+              ownerUserId: "users:owner",
+            }),
+            makeDigest("public-plugin"),
+          ],
+          isDone: true,
+          continueCursor: "",
+        },
+      ],
+    });
+
+    const result = await listPageForViewerInternalHandler(ctx, {
+      paginationOpts: { cursor: null, numItems: 10 },
+      viewerUserId: "users:owner",
+    });
+
+    expect(result.page.map((entry) => entry.name)).toEqual(["secret-plugin", "public-plugin"]);
+  });
+
+  it("allows owners to filter to only their private packages", async () => {
+    const { ctx, indexNames } = makeDigestCtx({
+      pages: [
+        {
+          page: [
+            makeDigest("secret-plugin", {
+              channel: "private",
+              ownerUserId: "users:owner",
+            }),
+            makeDigest("other-secret", {
+              channel: "private",
+              ownerUserId: "users:other",
+            }),
+          ],
+          isDone: true,
+          continueCursor: "",
+        },
+      ],
+    });
+
+    const result = await listPageForViewerInternalHandler(ctx, {
+      channel: "private",
+      paginationOpts: { cursor: null, numItems: 10 },
+      viewerUserId: "users:owner",
+    });
+
+    expect(result.page.map((entry) => entry.name)).toEqual(["secret-plugin"]);
+    expect(indexNames).toEqual(["by_active_channel_updated"]);
+  });
+
   it("applies isOfficial filtering even with family and channel set", async () => {
     const { ctx } = makeDigestCtx({
       pages: [
@@ -609,6 +696,44 @@ describe("packages public queries", () => {
     });
 
     expect(result.map((entry) => entry.package.name)).toEqual(["tools-demo"]);
+  });
+
+  it("allows owners to search their private packages", async () => {
+    const { ctx } = makeDigestCtx({
+      capabilityPages: [
+        {
+          page: [
+            makeDigest("secret-tools", {
+              channel: "private",
+              ownerUserId: "users:owner",
+              executesCode: true,
+              capabilityTags: ["tools"],
+              capabilityTag: "tools",
+            }),
+            makeDigest("other-secret-tools", {
+              channel: "private",
+              ownerUserId: "users:other",
+              executesCode: true,
+              capabilityTags: ["tools"],
+              capabilityTag: "tools",
+            }),
+          ],
+          isDone: true,
+          continueCursor: "",
+        },
+      ],
+    });
+
+    const result = await searchForViewerInternalHandler(ctx, {
+      query: "secret",
+      executesCode: true,
+      capabilityTag: "tools",
+      channel: "private",
+      limit: 10,
+      viewerUserId: "users:owner",
+    });
+
+    expect(result.map((entry) => entry.package.name)).toEqual(["secret-tools"]);
   });
 
   it("uses the executesCode index for filtered public listings", async () => {
