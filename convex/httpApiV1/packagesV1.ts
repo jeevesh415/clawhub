@@ -377,6 +377,7 @@ function parsePackagePublishBody(body: unknown) {
   const parsed = parseArk(PackagePublishRequestSchema, body, "Package publish payload") as {
     name: string;
     displayName?: string;
+    ownerHandle?: string;
     family: "skill" | "code-plugin" | "bundle-plugin";
     version: string;
     changelog: string;
@@ -396,6 +397,7 @@ function parsePackagePublishBody(body: unknown) {
   return {
     name: parsed.name,
     displayName: parsed.displayName ?? undefined,
+    ownerHandle: parsed.ownerHandle?.trim().replace(/^@+/, "") || undefined,
     family: parsed.family,
     version: parsed.version,
     changelog: parsed.changelog,
@@ -610,7 +612,7 @@ export async function publishPackageV1Handler(ctx: ActionCtx, request: Request) 
       ? await parseMultipartPackagePublish(ctx, request)
       : parsePackagePublishBody(await request.json());
     const result = await runActionRef(ctx, internalRefs.packages.publishPackageForUserInternal, {
-      userId: auth.userId,
+      actorUserId: auth.userId,
       payload,
     });
     return json(result, 200, rate.headers);

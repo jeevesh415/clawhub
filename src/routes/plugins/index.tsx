@@ -201,7 +201,6 @@ export function PluginsIndex() {
                       {packageCapabilityLabel(item.family, item.executesCode)}
                     </span>
                   ) : null}
-                  {item.verificationTier ? <span className="tag">{item.verificationTier}</span> : null}
                 </div>
                 <div className="skill-card-title">{item.displayName}</div>
                 <div className="skills-row-slug">{item.name}</div>

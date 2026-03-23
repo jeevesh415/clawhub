@@ -78,7 +78,8 @@ const listVersionsHandler = (
 const insertReleaseInternalHandler = (
   insertReleaseInternal as unknown as WrappedHandler<
     {
-      userId: string;
+      actorUserId: string;
+      ownerUserId: string;
       name: string;
       displayName: string;
       family: "skill" | "code-plugin" | "bundle-plugin";
@@ -149,7 +150,7 @@ const publishPackageHandler = (
 const publishPackageForUserInternalHandler = (
   publishPackageForUserInternal as unknown as WrappedHandler<
     {
-      userId: string;
+      actorUserId: string;
       payload: unknown;
     },
     unknown
@@ -319,6 +320,7 @@ function makeDigestCtx(options: {
 function makeInsertReleaseCtx(
   existing: Record<string, unknown> | null,
   priorReleases: Array<Record<string, unknown>> = [],
+  users: Record<string, Record<string, unknown>> = {},
 ) {
   const patch = vi.fn();
   const insert = vi
@@ -329,7 +331,8 @@ function makeInsertReleaseCtx(
     insert,
     db: {
       get: vi.fn(async (id: string) => {
-        if (id === "users:owner") return { _id: id, trustedPublisher: false };
+        if (id in users) return users[id];
+        if (id === "users:owner") return { _id: id, role: "user", trustedPublisher: false };
         return null;
       }),
       query: vi.fn((table: string) => {
@@ -1115,7 +1118,8 @@ describe("packages public queries", () => {
 
     await expect(
       insertReleaseInternalHandler(ctx, {
-        userId: "users:owner",
+        actorUserId: "users:owner",
+        ownerUserId: "users:owner",
         name: "demo-plugin",
         displayName: "Demo Plugin",
         family: "code-plugin",
@@ -1134,7 +1138,8 @@ describe("packages public queries", () => {
 
     await expect(
       insertReleaseInternalHandler(ctx, {
-        userId: "users:owner",
+        actorUserId: "users:owner",
+        ownerUserId: "users:owner",
         name: "demo-plugin",
         displayName: "Demo Plugin",
         family: "code-plugin",
@@ -1163,7 +1168,8 @@ describe("packages public queries", () => {
     });
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "code-plugin",
@@ -1185,6 +1191,74 @@ describe("packages public queries", () => {
     );
   });
 
+  it("lets admins publish package releases on behalf of another owner", async () => {
+    const ctx = makeInsertReleaseCtx(
+      makePackageDoc({
+        ownerUserId: "users:openclaw",
+        channel: "official",
+        isOfficial: true,
+        stats: { downloads: 0, installs: 0, stars: 0, versions: 1 },
+      }),
+      [],
+      {
+        "users:admin": { _id: "users:admin", role: "admin", trustedPublisher: false },
+        "users:openclaw": { _id: "users:openclaw", role: "user", trustedPublisher: true },
+      },
+    );
+
+    await insertReleaseInternalHandler(ctx, {
+      actorUserId: "users:admin",
+      ownerUserId: "users:openclaw",
+      name: "demo-plugin",
+      displayName: "Demo Plugin",
+      family: "code-plugin",
+      version: "1.1.0",
+      changelog: "promote",
+      tags: ["latest"],
+      summary: "demo",
+      files: [],
+      integritySha256: "abc123",
+      channel: "official",
+    });
+
+    expect(ctx.insert).toHaveBeenCalledWith(
+      "packageReleases",
+      expect.objectContaining({
+        createdBy: "users:admin",
+      }),
+    );
+  });
+
+  it("rejects non-admin publishes on behalf of another owner", async () => {
+    const ctx = makeInsertReleaseCtx(
+      makePackageDoc({
+        ownerUserId: "users:openclaw",
+        stats: { downloads: 0, installs: 0, stars: 0, versions: 1 },
+      }),
+      [],
+      {
+        "users:owner": { _id: "users:owner", role: "user", trustedPublisher: false },
+        "users:openclaw": { _id: "users:openclaw", role: "user", trustedPublisher: true },
+      },
+    );
+
+    await expect(
+      insertReleaseInternalHandler(ctx, {
+        actorUserId: "users:owner",
+        ownerUserId: "users:openclaw",
+        name: "demo-plugin",
+        displayName: "Demo Plugin",
+        family: "code-plugin",
+        version: "1.1.0",
+        changelog: "promote",
+        tags: ["latest"],
+        summary: "demo",
+        files: [],
+        integritySha256: "abc123",
+      }),
+    ).rejects.toThrow("Forbidden");
+  });
+
   it("does not overwrite capability search fields for non-latest releases", async () => {
     const ctx = makeInsertReleaseCtx(
       makePackageDoc({
@@ -1197,7 +1271,8 @@ describe("packages public queries", () => {
     );
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "code-plugin",
@@ -1230,7 +1305,8 @@ describe("packages public queries", () => {
     );
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "code-plugin",
@@ -1262,7 +1338,8 @@ describe("packages public queries", () => {
     );
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "bundle-plugin",
@@ -1299,7 +1376,8 @@ describe("packages public queries", () => {
     );
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "code-plugin",
@@ -1327,7 +1405,8 @@ describe("packages public queries", () => {
     );
 
     await insertReleaseInternalHandler(ctx, {
-      userId: "users:owner",
+      actorUserId: "users:owner",
+      ownerUserId: "users:owner",
       name: "demo-plugin",
       displayName: "Demo Plugin",
       family: "code-plugin",
@@ -1372,7 +1451,7 @@ describe("packages public queries", () => {
   it("validates package publish payloads inside the action path", async () => {
     await expect(
       publishPackageForUserInternalHandler({} as never, {
-        userId: "users:owner",
+        actorUserId: "users:owner",
         payload: {
           name: "demo-plugin",
           family: "bundle-plugin",
@@ -1388,7 +1467,7 @@ describe("packages public queries", () => {
   it("rejects skill publishes on the package endpoint", async () => {
     await expect(
       publishPackageForUserInternalHandler({} as never, {
-        userId: "users:owner",
+        actorUserId: "users:owner",
         payload: {
           name: "demo-skill",
           family: "skill",

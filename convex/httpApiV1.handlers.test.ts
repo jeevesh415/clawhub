@@ -214,6 +214,36 @@ describe("httpApiV1 handlers", () => {
     });
   });
 
+  it("users/publisher ensures a shared publisher handle for admin", async () => {
+    const runMutation = vi.fn(async (_mutation: unknown, args: Record<string, unknown>) => {
+      if (isRateLimitArgs(args)) return okRate();
+      return { ok: true, userId: "users:openclaw", handle: "openclaw", created: true, trusted: true };
+    });
+    vi.mocked(requireApiTokenUser).mockResolvedValue({
+      userId: "users:admin",
+      user: { _id: "users:admin", role: "admin" },
+    } as never);
+
+    const response = await __handlers.usersPostRouterV1Handler(
+      makeCtx({ runQuery: vi.fn(), runAction: vi.fn(), runMutation }),
+      new Request("https://example.com/api/v1/users/publisher", {
+        method: "POST",
+        body: JSON.stringify({ handle: "OpenClaw", displayName: "OpenClaw", trusted: true }),
+      }),
+    );
+    if (response.status !== 200) throw new Error(await response.text());
+
+    expect(runMutation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorUserId: "users:admin",
+        handle: "openclaw",
+        displayName: "OpenClaw",
+        trusted: true,
+      }),
+    );
+  });
+
   it("search forwards limit and highlightedOnly", async () => {
     const runAction = vi.fn().mockResolvedValue([
       {
@@ -3039,6 +3069,7 @@ describe("httpApiV1 handlers", () => {
         },
         body: JSON.stringify({
           name: "demo-plugin",
+          ownerHandle: "openclaw",
           family: "bundle-plugin",
           version: "1.0.0",
           changelog: "init",
@@ -3062,6 +3093,13 @@ describe("httpApiV1 handlers", () => {
       expect.objectContaining({
         key: "user:users:1",
         limit: 120,
+      }),
+    );
+    expect(runAction).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorUserId: "users:1",
+        payload: expect.objectContaining({ ownerHandle: "openclaw" }),
       }),
     );
   });

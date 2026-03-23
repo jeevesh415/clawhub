@@ -32,6 +32,18 @@ export const getByIdInternal = internalQuery({
   handler: async (ctx, args) => ctx.db.get(args.userId),
 });
 
+export const getByHandleInternal = internalQuery({
+  args: { handle: v.string() },
+  handler: async (ctx, args) => {
+    const normalizedHandle = normalizeReservedHandle(args.handle);
+    if (!normalizedHandle) return null;
+    return await ctx.db
+      .query("users")
+      .withIndex("handle", (q) => q.eq("handle", normalizedHandle))
+      .unique();
+  },
+});
+
 export const searchInternal = internalQuery({
   args: {
     actorUserId: v.id("users"),
@@ -717,6 +729,111 @@ export const setTrustedPublisherInternal = internalMutation({
 
     return { ok: true as const, trusted: args.trusted };
   },
+});
+
+async function ensurePublisherHandleWithActor(
+  ctx: MutationCtx,
+  args: {
+    actorUserId: Id<"users">;
+    handle: string;
+    displayName?: string;
+    trusted?: boolean;
+  },
+) {
+  const actor = await ctx.db.get(args.actorUserId);
+  if (!actor || actor.deletedAt || actor.deactivatedAt) throw new Error("User not found");
+  assertAdmin(actor);
+
+  const normalizedHandle = normalizeReservedHandle(args.handle);
+  if (!normalizedHandle) throw new Error("Handle required");
+
+  const existing = await ctx.db
+    .query("users")
+    .withIndex("handle", (q) => q.eq("handle", normalizedHandle))
+    .unique();
+  if (existing?.deletedAt || existing?.deactivatedAt) {
+    throw new Error("Handle belongs to a deleted or deactivated user");
+  }
+
+  const now = Date.now();
+  const displayName = args.displayName?.trim() || normalizedHandle;
+  const trusted = args.trusted === false ? undefined : true;
+  const userId =
+    existing?._id ??
+    (await ctx.db.insert("users", {
+      handle: normalizedHandle,
+      displayName,
+      role: "user",
+      trustedPublisher: trusted,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+  if (existing) {
+    const nextDisplayName =
+      args.displayName?.trim() && (!existing.displayName || existing.displayName === existing.handle)
+        ? displayName
+        : existing.displayName;
+    await ctx.db.patch(existing._id, {
+      displayName: nextDisplayName,
+      trustedPublisher: trusted,
+      updatedAt: now,
+    });
+  }
+
+  await upsertReservedHandleForRightfulOwner(ctx, {
+    handle: normalizedHandle,
+    rightfulOwnerUserId: userId,
+    reason: "shared publisher",
+    now,
+  });
+
+  await ctx.db.insert("auditLogs", {
+    actorUserId: args.actorUserId,
+    action: "user.publisher.ensure",
+    targetType: "user",
+    targetId: userId,
+    metadata: {
+      handle: normalizedHandle,
+      trusted: trusted === true,
+    },
+    createdAt: now,
+  });
+
+  return {
+    ok: true as const,
+    userId,
+    handle: normalizedHandle,
+    created: !existing,
+    trusted: trusted === true,
+  };
+}
+
+export const ensurePublisherHandle = mutation({
+  args: {
+    handle: v.string(),
+    displayName: v.optional(v.string()),
+    trusted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const { user } = await requireUser(ctx);
+    return await ensurePublisherHandleWithActor(ctx, {
+      actorUserId: user._id,
+      handle: args.handle,
+      displayName: args.displayName,
+      trusted: args.trusted,
+    });
+  },
+});
+
+export const ensurePublisherHandleInternal = internalMutation({
+  args: {
+    actorUserId: v.id("users"),
+    handle: v.string(),
+    displayName: v.optional(v.string()),
+    trusted: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => await ensurePublisherHandleWithActor(ctx, args),
 });
 
 /**

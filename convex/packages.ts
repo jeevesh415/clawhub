@@ -13,7 +13,7 @@ import { action, internalAction, internalMutation, internalQuery, query } from "
 import type { Doc, Id } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import { requireGitHubAccountAge } from "./lib/githubAccount";
-import { assertModerator, requireUserFromAction } from "./lib/access";
+import { assertAdmin, assertModerator, requireUserFromAction } from "./lib/access";
 import {
   assertPackageVersion,
   ensurePluginNameMatchesPackage,
@@ -55,6 +55,10 @@ const internalRefs = internal as unknown as {
   };
   skills: {
     getSkillBySlugInternal: unknown;
+  };
+  users: {
+    getByIdInternal: unknown;
+    getByHandleInternal: unknown;
   };
   vt: {
     scanPackageReleaseWithVirusTotal: unknown;
@@ -1036,7 +1040,7 @@ export const getPackageReleaseScanBackfillBatchInternal = internalQuery({
 
 async function publishPackageImpl(
   ctx: Parameters<typeof requireGitHubAccountAge>[0] & Pick<ActionCtx, "storage" | "scheduler">,
-  userId: Id<"users">,
+  actorUserId: Id<"users">,
   rawPayload: unknown,
 ) {
   const payload = parseArk(
@@ -1047,7 +1051,8 @@ async function publishPackageImpl(
   if (payload.family === "skill") {
     throw new ConvexError("Skill packages must use the skills publish flow");
   }
-  await requireGitHubAccountAge(ctx, userId);
+  await requireGitHubAccountAge(ctx, actorUserId);
+  const ownerUserId = await resolvePackageOwnerUserId(ctx, actorUserId, payload.ownerHandle);
 
   const family = payload.family;
   const name = normalizePackageName(payload.name);
@@ -1143,27 +1148,30 @@ async function publishPackageImpl(
     ctx,
     internalRefs.packages.insertReleaseInternal,
     {
-    userId,
-    name,
-    displayName,
-    family,
-    version,
-    changelog: payload.changelog.trim(),
-    tags: payload.tags?.map((tag: string) => tag.trim()).filter(Boolean) ?? ["latest"],
-    summary,
-    sourceRepo: payload.source?.repo || payload.source?.url,
-    runtimeId: codeArtifacts?.runtimeId ?? bundleArtifacts?.runtimeId,
-    channel: payload.channel,
-    compatibility: codeArtifacts?.compatibility ?? bundleArtifacts?.compatibility,
-    capabilities: codeArtifacts?.capabilities ?? bundleArtifacts?.capabilities,
-    verification,
-    staticScan,
-    files,
-    integritySha256,
-    extractedPackageJson: packageJson,
-    extractedPluginManifest: family === "code-plugin" ? maybeParseJson(pluginManifestEntry?.text) : undefined,
-    normalizedBundleManifest: family === "bundle-plugin" ? maybeParseJson(bundleManifestEntry?.text) : undefined,
-    source: payload.source,
+      actorUserId,
+      ownerUserId,
+      name,
+      displayName,
+      family,
+      version,
+      changelog: payload.changelog.trim(),
+      tags: payload.tags?.map((tag: string) => tag.trim()).filter(Boolean) ?? ["latest"],
+      summary,
+      sourceRepo: payload.source?.repo || payload.source?.url,
+      runtimeId: codeArtifacts?.runtimeId ?? bundleArtifacts?.runtimeId,
+      channel: payload.channel,
+      compatibility: codeArtifacts?.compatibility ?? bundleArtifacts?.compatibility,
+      capabilities: codeArtifacts?.capabilities ?? bundleArtifacts?.capabilities,
+      verification,
+      staticScan,
+      files,
+      integritySha256,
+      extractedPackageJson: packageJson,
+      extractedPluginManifest:
+        family === "code-plugin" ? maybeParseJson(pluginManifestEntry?.text) : undefined,
+      normalizedBundleManifest:
+        family === "bundle-plugin" ? maybeParseJson(bundleManifestEntry?.text) : undefined,
+      source: payload.source,
     },
   );
 
@@ -1187,11 +1195,11 @@ export const publishPackage = action({
 
 export const publishPackageForUserInternal = internalAction({
   args: {
-    userId: v.id("users"),
+    actorUserId: v.id("users"),
     payload: v.any(),
   },
   handler: async (ctx, args) => {
-    return await publishPackageImpl(ctx, args.userId, args.payload);
+    return await publishPackageImpl(ctx, args.actorUserId, args.payload);
   },
 });
 
@@ -1205,7 +1213,8 @@ export const publishRelease = action({
 
 export const insertReleaseInternal = internalMutation({
   args: {
-    userId: v.id("users"),
+    actorUserId: v.id("users"),
+    ownerUserId: v.id("users"),
     name: v.string(),
     displayName: v.string(),
     family: v.union(v.literal("skill"), v.literal("code-plugin"), v.literal("bundle-plugin")),
@@ -1238,8 +1247,13 @@ export const insertReleaseInternal = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const normalizedName = normalizePackageName(args.name);
-    const owner = await ctx.db.get(args.userId);
+    const actor = await ctx.db.get(args.actorUserId);
+    if (!actor) throw new ConvexError("Unauthorized");
+    const owner = await ctx.db.get(args.ownerUserId);
     if (!owner) throw new ConvexError("Unauthorized");
+    if (args.ownerUserId !== args.actorUserId) {
+      assertAdmin(actor);
+    }
     if (args.channel === "official" && !owner.trustedPublisher) {
       throw new ConvexError("Only trusted publishers may publish to the official channel");
     }
@@ -1252,7 +1266,7 @@ export const insertReleaseInternal = internalMutation({
           ? "official"
           : "community");
     const nextIsOfficial = nextChannel === "official";
-    if (existing && existing.ownerUserId !== args.userId) {
+    if (existing && existing.ownerUserId !== args.ownerUserId) {
       throw new ConvexError("Package already exists and belongs to another user");
     }
     if (existing && existing.family !== args.family) {
@@ -1288,7 +1302,7 @@ export const insertReleaseInternal = internalMutation({
         normalizedName,
         displayName: args.displayName,
         summary: args.summary,
-        ownerUserId: args.userId,
+        ownerUserId: args.ownerUserId,
         family: args.family,
         channel: nextChannel,
         isOfficial: nextIsOfficial,
@@ -1341,7 +1355,7 @@ export const insertReleaseInternal = internalMutation({
       verification: args.verification,
       staticScan: args.staticScan,
       source: args.source,
-      createdBy: args.userId,
+      createdBy: args.actorUserId,
       createdAt: now,
     });
 
@@ -1398,7 +1412,6 @@ export const insertReleaseInternal = internalMutation({
     };
   },
 });
-
 function isReleaseActive(release: Doc<"packageReleases"> | null | undefined) {
   return Boolean(release && !release.softDeletedAt);
 }
@@ -1558,3 +1571,32 @@ export const backfillPackageReleaseScans = action({
     });
   },
 });
+
+async function resolvePackageOwnerUserId(
+  ctx: Pick<ActionCtx, "runQuery">,
+  actorUserId: Id<"users">,
+  ownerHandle: string | undefined,
+) {
+  const normalizedHandle = ownerHandle?.trim().replace(/^@+/, "").toLowerCase();
+  if (!normalizedHandle) return actorUserId;
+
+  const actor = await runQueryRef<Doc<"users"> | null>(ctx, internalRefs.users.getByIdInternal, {
+    userId: actorUserId,
+  });
+  if (!actor || actor.deletedAt || actor.deactivatedAt) {
+    throw new ConvexError("Unauthorized");
+  }
+  if ((actor.handle ?? "").trim().toLowerCase() === normalizedHandle) {
+    return actorUserId;
+  }
+
+  assertAdmin(actor);
+
+  const owner = await runQueryRef<Doc<"users"> | null>(ctx, internalRefs.users.getByHandleInternal, {
+    handle: normalizedHandle,
+  });
+  if (!owner || owner.deletedAt || owner.deactivatedAt) {
+    throw new ConvexError(`Owner handle "@${normalizedHandle}" not found`);
+  }
+  return owner._id;
+}
