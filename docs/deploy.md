@@ -25,14 +25,54 @@ bunx convex deploy
 Or use the GitHub Actions pipeline:
 
 ```bash
-gh workflow run deploy.yml
+gh workflow run deploy.yml --repo openclaw/clawhub --ref main
 ```
 
-GitHub Actions secrets required for `deploy.yml`:
+Production deploy notes:
 
-- `CONVEX_DEPLOY_KEY`
-- `VERCEL_TOKEN`
-- Optional: `PLAYWRIGHT_AUTH_STORAGE_STATE_JSON` for authenticated smoke coverage
+- `deploy.yml` is manual-only (`workflow_dispatch`). Merging to `main` does not deploy.
+- The workflow must be started from `main`.
+- Deploy targets:
+  - `full`: deploy Convex, verify contract, wait for the matching Vercel production deploy, then run smoke tests
+  - `backend`: deploy Convex, verify contract, then run smoke tests against current production
+  - `frontend`: wait for the Vercel production deploy for the selected `main` SHA, then run smoke tests
+- `frontend` does not call `vercel deploy` directly yet. It relies on the existing Vercel Git-based production deploy for that SHA.
+- The real deploy job uses the GitHub `Production` environment for deploy secrets, but it does not wait for a separate approval.
+- Required `Production` environment secret: `CONVEX_DEPLOY_KEY`.
+- Optional `Production` environment secret: `PLAYWRIGHT_AUTH_STORAGE_STATE_JSON` for authenticated smoke coverage.
+
+## CLI npm release
+
+The `clawhub` CLI package is released separately from the app deploy.
+Only stable releases are supported here: `vX.Y.Z`.
+
+Use the GitHub Actions workflow:
+
+```bash
+gh workflow run clawhub-cli-npm-release.yml \
+  --repo openclaw/clawhub \
+  --ref main \
+  -f tag=v0.10.0 \
+  -f preflight_only=true
+```
+
+Then rerun the same workflow from `main` with:
+
+- the same `tag`
+- `preflight_only=false`
+- `preflight_run_id=<successful preflight run id>`
+
+CLI release notes:
+
+- Real publishes are manual-only and require the workflow to be started from `main`.
+- The publish job waits at the GitHub `npm-release` environment for approval.
+- npm auth is handled through npm trusted publishing, not an `NPM_TOKEN`.
+- npm trusted publisher must be configured for package `clawhub` with repository `openclaw/clawhub`, workflow `clawhub-cli-npm-release.yml`, and environment `npm-release`.
+
+That workflow assumes Vercel Git integration is enabled for this repo. It does
+not run `vercel deploy` directly; frontend-related steps wait for the GitHub
+commit status `Vercel – clawhub` for the selected SHA, then run smoke tests
+against production.
 
 Ensure Convex env is set (auth + embeddings):
 
@@ -60,10 +100,8 @@ Deploy order:
 
 1. Convex
 2. contract verify
-3. web
+3. wait for Vercel production deploy for the same Git SHA
 4. smoke
-
-Do not let Vercel auto-promote a newer web build before Convex is deployed.
 
 ## 3) Route `/api/*` to Convex
 

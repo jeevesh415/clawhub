@@ -5,27 +5,33 @@ import type { QueryCtx } from "./_generated/server";
 import { action, internalQuery } from "./functions";
 import { isSkillHighlighted } from "./lib/badges";
 import { generateEmbedding } from "./lib/embeddings";
-import type { HydratableSkill } from "./lib/public";
-import { toPublicSkill, toPublicSoul, toPublicUser } from "./lib/public";
+import type { HydratableSkill, PublicPublisher } from "./lib/public";
+import { toPublicPublisher, toPublicSkill, toPublicSoul } from "./lib/public";
+import { SKILL_CAPABILITY_TAGS } from "./lib/skillCapabilityTags";
+import { getOwnerPublisher } from "./lib/publishers";
 import { matchesExactTokens, tokenize } from "./lib/searchText";
 import { isSkillSuspicious } from "./lib/skillSafety";
 import { digestToHydratableSkill, digestToOwnerInfo } from "./lib/skillSearchDigest";
 
-type OwnerInfo = { ownerHandle: string | null; owner: ReturnType<typeof toPublicUser> | null };
+type OwnerInfo = { ownerHandle: string | null; owner: PublicPublisher | null };
 
 function makeOwnerInfoGetter(ctx: Pick<QueryCtx, "db">) {
-  const ownerCache = new Map<Id<"users">, Promise<OwnerInfo>>();
-  return (ownerUserId: Id<"users">) => {
-    const cached = ownerCache.get(ownerUserId);
+  const ownerCache = new Map<string, Promise<OwnerInfo>>();
+  return (ownerUserId: Id<"users">, ownerPublisherId?: Id<"publishers"> | null) => {
+    const cacheKey = String(ownerPublisherId ?? ownerUserId);
+    const cached = ownerCache.get(cacheKey);
     if (cached) return cached;
-    const ownerPromise = ctx.db.get(ownerUserId).then((ownerDoc) => {
-      const owner = toPublicUser(ownerDoc);
+    const ownerPromise = getOwnerPublisher(ctx, {
+      ownerPublisherId,
+      ownerUserId,
+    }).then((ownerDoc) => {
+      const owner = toPublicPublisher(ownerDoc);
       return {
-        ownerHandle: owner?.handle ?? owner?.name ?? null,
+        ownerHandle: owner?.handle ?? null,
         owner,
       };
     });
-    ownerCache.set(ownerUserId, ownerPromise);
+    ownerCache.set(cacheKey, ownerPromise);
     return ownerPromise;
   };
 }
@@ -35,7 +41,7 @@ type SkillSearchEntry = {
   skill: NonNullable<ReturnType<typeof toPublicSkill>>;
   version: Doc<"skillVersions"> | null;
   ownerHandle: string | null;
-  owner: ReturnType<typeof toPublicUser> | null;
+  owner: PublicPublisher | null;
 };
 
 type SearchResult = SkillSearchEntry & { score: number };
@@ -46,6 +52,7 @@ const NAME_EXACT_BOOST = 1.1;
 const NAME_PREFIX_BOOST = 0.6;
 const POPULARITY_WEIGHT = 0.08;
 const FALLBACK_SCAN_LIMIT = 500;
+const SKILL_CAPABILITY_TAG_SET = new Set<string>(SKILL_CAPABILITY_TAGS);
 
 function getNextCandidateLimit(current: number, max: number) {
   const next = Math.min(current * 2, max);
@@ -111,18 +118,44 @@ function mergeUniqueBySkillId(primary: SkillSearchEntry[], fallback: SkillSearch
   return out;
 }
 
+function isSlugLikeQuery(query: string) {
+  return /^[a-z0-9][a-z0-9-]*$/.test(query.trim().toLowerCase());
+}
+
+function matchesCapabilityTag(
+  skill: Pick<HydratableSkill, "capabilityTags">,
+  capabilityTag?: string,
+) {
+  if (!capabilityTag) return true;
+  return (skill.capabilityTags ?? []).includes(capabilityTag);
+}
+
 export const searchSkills: ReturnType<typeof action> = action({
   args: {
     query: v.string(),
     limit: v.optional(v.number()),
     highlightedOnly: v.optional(v.boolean()),
     nonSuspiciousOnly: v.optional(v.boolean()),
+    capabilityTag: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<SearchResult[]> => {
     const query = args.query.trim();
     if (!query) return [];
+    if (args.capabilityTag && !SKILL_CAPABILITY_TAG_SET.has(args.capabilityTag)) return [];
     const queryTokens = tokenize(query);
     if (queryTokens.length === 0) return [];
+    const rawExactSlugMatch = isSlugLikeQuery(query)
+      ? ((await ctx.runQuery(internal.search.getExactSkillSlugMatch, {
+          slug: query.toLowerCase(),
+          nonSuspiciousOnly: args.nonSuspiciousOnly,
+        })) as SkillSearchEntry | null)
+      : null;
+    const exactSlugMatch =
+      rawExactSlugMatch &&
+      (!args.highlightedOnly || isSkillHighlighted(rawExactSlugMatch.skill)) &&
+      matchesCapabilityTag(rawExactSlugMatch.skill, args.capabilityTag)
+        ? rawExactSlugMatch
+        : null;
     let vector: number[];
     try {
       vector = await generateEmbedding(query);
@@ -166,9 +199,11 @@ export const searchSkills: ReturnType<typeof action> = action({
 
       // Skills already have badges from their docs (via toPublicSkill).
       // No need for a separate badge table lookup.
-      const filtered = args.highlightedOnly
-        ? hydrated.filter((entry) => isSkillHighlighted(entry.skill))
-        : hydrated;
+      const filtered = hydrated.filter(
+        (entry) =>
+          (!args.highlightedOnly || isSkillHighlighted(entry.skill)) &&
+          matchesCapabilityTag(entry.skill, args.capabilityTag),
+      );
 
       exactMatches = filtered.filter((entry) =>
         matchesExactTokens(queryTokens, [
@@ -187,8 +222,12 @@ export const searchSkills: ReturnType<typeof action> = action({
       candidateLimit = nextLimit;
     }
 
+    const primaryMatches = exactSlugMatch
+      ? mergeUniqueBySkillId([exactSlugMatch], exactMatches)
+      : exactMatches;
+
     const fallbackMatches =
-      exactMatches.length >= limit
+      primaryMatches.length >= limit
         ? []
         : ((await ctx.runQuery(internal.search.lexicalFallbackSkills, {
             query,
@@ -196,9 +235,10 @@ export const searchSkills: ReturnType<typeof action> = action({
             limit: Math.min(Math.max(limit * 4, 200), FALLBACK_SCAN_LIMIT),
             highlightedOnly: args.highlightedOnly,
             nonSuspiciousOnly: args.nonSuspiciousOnly,
+            capabilityTag: args.capabilityTag,
+            skipExactSlugLookup: true,
           })) as SkillSearchEntry[]);
-
-    const mergedMatches = mergeUniqueBySkillId(exactMatches, fallbackMatches);
+    const mergedMatches = mergeUniqueBySkillId(primaryMatches, fallbackMatches);
 
     return mergedMatches
       .map((entry) => {
@@ -217,6 +257,33 @@ export const searchSkills: ReturnType<typeof action> = action({
       .filter((entry) => entry.skill)
       .sort((a, b) => b.score - a.score || b.skill.stats.downloads - a.skill.stats.downloads)
       .slice(0, limit);
+  },
+});
+
+export const getExactSkillSlugMatch = internalQuery({
+  args: {
+    slug: v.string(),
+    nonSuspiciousOnly: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<SkillSearchEntry | null> => {
+    const skill = await ctx.db
+      .query("skills")
+      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
+      .unique();
+    if (!skill || skill.softDeletedAt) return null;
+    if (args.nonSuspiciousOnly && isSkillSuspicious(skill)) return null;
+
+    const getOwnerInfo = makeOwnerInfoGetter(ctx);
+    const resolved = await getOwnerInfo(skill.ownerUserId, skill.ownerPublisherId);
+    const publicSkill = toPublicSkill(skill);
+    if (!publicSkill || !resolved.owner) return null;
+
+    return {
+      skill: publicSkill,
+      version: null,
+      ownerHandle: resolved.ownerHandle,
+      owner: resolved.owner,
+    };
   },
 });
 
@@ -254,7 +321,9 @@ export const hydrateResults = internalQuery({
         // Use pre-resolved owner from digest to avoid reading the users table.
         // Fall back to live lookup when digest owner is null (deactivated/deleted user).
         const preResolved = digest ? digestToOwnerInfo(digest) : null;
-        const resolved = preResolved?.owner ? preResolved : await getOwnerInfo(skill.ownerUserId);
+        const resolved = preResolved?.owner
+          ? preResolved
+          : await getOwnerInfo(skill.ownerUserId, skill.ownerPublisherId);
         const publicSkill = toPublicSkill(skill);
         if (!publicSkill || !resolved.owner) return null;
         return {
@@ -278,20 +347,23 @@ export const lexicalFallbackSkills = internalQuery({
     limit: v.optional(v.number()),
     highlightedOnly: v.optional(v.boolean()),
     nonSuspiciousOnly: v.optional(v.boolean()),
+    capabilityTag: v.optional(v.string()),
+    skipExactSlugLookup: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<SkillSearchEntry[]> => {
+    if (args.capabilityTag && !SKILL_CAPABILITY_TAG_SET.has(args.capabilityTag)) return [];
     const limit = Math.min(Math.max(args.limit ?? 200, 10), FALLBACK_SCAN_LIMIT);
     const seenSkillIds = new Set<Id<"skills">>();
     const candidates: HydratableSkill[] = [];
     // Keep digest rows around so we can resolve owner info without hitting users table.
     const preResolvedOwners = new Map<
       Id<"skills">,
-      { ownerHandle: string | null; owner: ReturnType<typeof toPublicUser> | null }
+      { ownerHandle: string | null; owner: PublicPublisher | null }
     >();
 
     // Exact slug match via the skills table (only one row, cheap).
     const slugQuery = args.query.trim().toLowerCase();
-    if (/^[a-z0-9][a-z0-9-]*$/.test(slugQuery)) {
+    if (!args.skipExactSlugLookup && /^[a-z0-9][a-z0-9-]*$/.test(slugQuery)) {
       const exactSlugSkill = await ctx.db
         .query("skills")
         .withIndex("by_slug", (q) => q.eq("slug", slugQuery))
@@ -299,7 +371,8 @@ export const lexicalFallbackSkills = internalQuery({
       if (
         exactSlugSkill &&
         !exactSlugSkill.softDeletedAt &&
-        (!args.nonSuspiciousOnly || !isSkillSuspicious(exactSlugSkill))
+        (!args.nonSuspiciousOnly || !isSkillSuspicious(exactSlugSkill)) &&
+        matchesCapabilityTag(exactSlugSkill, args.capabilityTag)
       ) {
         seenSkillIds.add(exactSlugSkill._id);
         candidates.push(exactSlugSkill);
@@ -317,6 +390,7 @@ export const lexicalFallbackSkills = internalQuery({
       if (seenSkillIds.has(digest.skillId)) continue;
       const skill = digestToHydratableSkill(digest);
       if (args.nonSuspiciousOnly && isSkillSuspicious(skill)) continue;
+      if (!matchesCapabilityTag(skill, args.capabilityTag)) continue;
       seenSkillIds.add(digest.skillId);
       candidates.push(skill);
       // Pre-resolve owner from digest to avoid users table reads.
@@ -335,7 +409,9 @@ export const lexicalFallbackSkills = internalQuery({
     const entries = await Promise.all(
       matched.map(async (skill) => {
         const preResolved = preResolvedOwners.get(skill._id);
-        const resolved = preResolved?.owner ? preResolved : await getOwnerInfo(skill.ownerUserId);
+        const resolved = preResolved?.owner
+          ? preResolved
+          : await getOwnerInfo(skill.ownerUserId, skill.ownerPublisherId);
         const publicSkill = toPublicSkill(skill);
         if (!publicSkill || !resolved.owner) return null;
         return {

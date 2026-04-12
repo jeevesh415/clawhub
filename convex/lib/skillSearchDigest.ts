@@ -1,10 +1,12 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
-import type { HydratableSkill, PublicUser } from "./public";
+import type { HydratableSkill, PublicPublisher } from "./public";
 
 function pick<T extends Record<string, unknown>, K extends keyof T>(obj: T, keys: K[]): Pick<T, K> {
   return Object.fromEntries(keys.map((k) => [k, obj[k]])) as Pick<T, K>;
 }
+
+type SharedSkillKey = Extract<keyof Doc<"skills">, keyof Doc<"skillSearchDigest">>;
 
 /**
  * Fields shared 1:1 between `skills` and `skillSearchDigest` (same name,
@@ -16,11 +18,13 @@ const SHARED_KEYS = [
   "displayName",
   "summary",
   "ownerUserId",
+  "ownerPublisherId",
   "canonicalSkillId",
   "forkOf",
   "latestVersionId",
   "latestVersionSummary",
   "tags",
+  "capabilityTags",
   "badges",
   "stats",
   "statsDownloads",
@@ -33,13 +37,14 @@ const SHARED_KEYS = [
   "moderationReason",
   "createdAt",
   "updatedAt",
-] as const satisfies readonly (keyof Doc<"skills"> & keyof Doc<"skillSearchDigest">)[];
+] as const satisfies readonly SharedSkillKey[];
 
 /** Fields stored in the skillSearchDigest table. */
 export type SkillSearchDigestFields = Pick<Doc<"skills">, (typeof SHARED_KEYS)[number]> & {
   skillId: Id<"skills">;
   isSuspicious?: boolean;
   ownerHandle?: string;
+  ownerKind?: "user" | "org";
   ownerName?: string;
   ownerDisplayName?: string;
   ownerImage?: string;
@@ -106,14 +111,21 @@ function hasDigestChanged(
 export function digestToOwnerInfo(
   digest: Pick<
     Doc<"skillSearchDigest">,
-    "ownerHandle" | "ownerName" | "ownerDisplayName" | "ownerImage" | "ownerUserId"
+    | "ownerHandle"
+    | "ownerKind"
+    | "ownerName"
+    | "ownerDisplayName"
+    | "ownerImage"
+    | "ownerUserId"
+    | "ownerPublisherId"
   >,
-): { ownerHandle: string | null; owner: PublicUser | null } | null {
+): { ownerHandle: string | null; owner: PublicPublisher | null } | null {
   if (digest.ownerHandle === undefined) return null;
   // Empty string means backfilled but owner has no handle.
   // Use userId as fallback handle, matching the live getOwnerInfo path.
   const handle = digest.ownerHandle || undefined;
-  const fallbackHandle = handle ?? String(digest.ownerUserId);
+  const fallbackHandle = handle ?? String(digest.ownerPublisherId ?? digest.ownerUserId);
+  const resolvedHandle = handle ?? fallbackHandle;
   // Determine if we have real profile data (deactivated/deleted owners have
   // all profile fields undefined, while handle-less visible owners still have
   // name/displayName/image populated).
@@ -126,13 +138,14 @@ export function digestToOwnerInfo(
     owner:
       handle || hasProfileData
         ? {
-            _id: digest.ownerUserId,
+            _id: digest.ownerPublisherId ?? ("publishers:missing" as Id<"publishers">),
             _creationTime: 0,
-            handle,
-            name: digest.ownerName,
-            displayName: digest.ownerDisplayName,
+            handle: resolvedHandle,
+            displayName: digest.ownerDisplayName ?? digest.ownerName ?? resolvedHandle,
             image: digest.ownerImage,
             bio: undefined,
+            kind: digest.ownerKind ?? "user",
+            linkedUserId: digest.ownerKind === "org" ? undefined : digest.ownerUserId,
           }
         : null,
   };

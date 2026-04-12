@@ -69,12 +69,25 @@ function toPublicSoulVersion(
   };
 }
 
+function normalizeSoulSlugKey(slug: string) {
+  return slug.trim().toLowerCase();
+}
+
+function normalizeSoulSlugForWrite(slug: string) {
+  const normalized = normalizeSoulSlugKey(slug);
+  if (!normalized || !/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+    throw new ConvexError("Slug must be lowercase and url-safe");
+  }
+  return normalized;
+}
+
 export const getBySlug = query({
   args: { slug: v.string() },
   handler: async (ctx, args) => {
+    const slug = normalizeSoulSlugKey(args.slug);
     const matches = await ctx.db
       .query("souls")
-      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
       .order("desc")
       .take(2);
     const soul = matches[0] ?? null;
@@ -93,9 +106,10 @@ export const getBySlug = query({
 export const getSoulBySlugInternal = internalQuery({
   args: { slug: v.string() },
   handler: async (ctx, args) => {
+    const slug = normalizeSoulSlugKey(args.slug);
     const matches = await ctx.db
       .query("souls")
-      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
       .order("desc")
       .take(2);
     return matches[0] ?? null;
@@ -124,11 +138,10 @@ export const list = query({
     }
     const entries = await ctx.db
       .query("souls")
+      .withIndex("by_active_updated", (q) => q.eq("softDeletedAt", undefined))
       .order("desc")
-      .take(limit * 5);
+      .take(limit);
     return entries
-      .filter((soul) => !soul.softDeletedAt)
-      .slice(0, limit)
       .map((soul) => toPublicSoul(soul))
       .filter((soul): soul is NonNullable<typeof soul> => Boolean(soul));
   },
@@ -484,12 +497,13 @@ export const insertVersion = internalMutation({
   },
   handler: async (ctx, args) => {
     const userId = args.userId;
+    const slug = normalizeSoulSlugForWrite(args.slug);
     const user = await ctx.db.get(userId);
     if (!user || user.deletedAt || user.deactivatedAt) throw new Error("User not found");
 
     const soulMatches = await ctx.db
       .query("souls")
-      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
       .order("desc")
       .take(2);
     let soul: Doc<"souls"> | null = soulMatches[0] ?? null;
@@ -502,7 +516,7 @@ export const insertVersion = internalMutation({
     if (!soul) {
       const summary = args.summary ?? getFrontmatterValue(args.parsed.frontmatter, "description");
       const soulId = await ctx.db.insert("souls", {
-        slug: args.slug,
+        slug,
         displayName: args.displayName,
         summary: summary ?? undefined,
         ownerUserId: userId,

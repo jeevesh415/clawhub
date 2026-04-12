@@ -6,6 +6,11 @@ export type PublicUser = Pick<
   "_id" | "_creationTime" | "handle" | "name" | "displayName" | "image" | "bio"
 >;
 
+export type PublicPublisher = Pick<
+  Doc<"publishers">,
+  "_id" | "_creationTime" | "kind" | "handle" | "displayName" | "image" | "bio" | "linkedUserId"
+>;
+
 export type PublicSkill = Pick<
   Doc<"skills">,
   | "_id"
@@ -14,10 +19,12 @@ export type PublicSkill = Pick<
   | "displayName"
   | "summary"
   | "ownerUserId"
+  | "ownerPublisherId"
   | "canonicalSkillId"
   | "forkOf"
   | "latestVersionId"
   | "tags"
+  | "capabilityTags"
   | "badges"
   | "stats"
   | "createdAt"
@@ -38,11 +45,13 @@ export type HydratableSkill = Pick<
   | "displayName"
   | "summary"
   | "ownerUserId"
+  | "ownerPublisherId"
   | "canonicalSkillId"
   | "forkOf"
   | "latestVersionId"
   | "latestVersionSummary"
   | "tags"
+  | "capabilityTags"
   | "badges"
   | "stats"
   | "statsDownloads"
@@ -65,6 +74,7 @@ export type PublicSoul = Pick<
   | "displayName"
   | "summary"
   | "ownerUserId"
+  | "ownerPublisherId"
   | "latestVersionId"
   | "tags"
   | "stats"
@@ -82,6 +92,22 @@ export function toPublicUser(user: Doc<"users"> | null | undefined): PublicUser 
     displayName: user.displayName,
     image: user.image,
     bio: user.bio,
+  };
+}
+
+export function toPublicPublisher(
+  publisher: Doc<"publishers"> | null | undefined,
+): PublicPublisher | null {
+  if (!publisher || publisher.deletedAt || publisher.deactivatedAt) return null;
+  return {
+    _id: publisher._id,
+    _creationTime: publisher._creationTime,
+    kind: publisher.kind,
+    handle: publisher.handle,
+    displayName: publisher.displayName,
+    image: publisher.image,
+    bio: publisher.bio,
+    linkedUserId: publisher.linkedUserId,
   };
 }
 
@@ -112,10 +138,12 @@ export function toPublicSkill(skill: HydratableSkill | null | undefined): Public
     displayName: skill.displayName,
     summary: skill.summary,
     ownerUserId: skill.ownerUserId,
+    ownerPublisherId: skill.ownerPublisherId,
     canonicalSkillId: skill.canonicalSkillId,
     forkOf: skill.forkOf,
     latestVersionId: skill.latestVersionId,
     tags: skill.tags,
+    capabilityTags: skill.capabilityTags,
     badges: skill.badges,
     stats,
     createdAt: skill.createdAt,
@@ -132,6 +160,7 @@ export function toPublicSoul(soul: Doc<"souls"> | null | undefined): PublicSoul 
     displayName: soul.displayName,
     summary: soul.summary,
     ownerUserId: soul.ownerUserId,
+    ownerPublisherId: soul.ownerPublisherId,
     latestVersionId: soul.latestVersionId,
     tags: soul.tags,
     stats: soul.stats,

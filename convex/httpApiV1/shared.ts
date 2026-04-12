@@ -3,8 +3,9 @@ import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import { assertAdmin } from "../lib/access";
-import { requireApiTokenUser } from "../lib/apiTokenAuth";
+import { requireApiTokenUser, requirePackagePublishAuth } from "../lib/apiTokenAuth";
 import { corsHeaders, mergeHeaders } from "../lib/httpHeaders";
+import { getPublishFileSizeError, MAX_PUBLISH_FILE_BYTES } from "../lib/publishLimits";
 import { isMacJunkPath } from "../lib/skills";
 
 export const MAX_RAW_FILE_BYTES = 200 * 1024;
@@ -95,6 +96,18 @@ export async function requireApiTokenUserOrResponse(
   try {
     const auth = await requireApiTokenUser(ctx, request);
     return { ok: true as const, userId: auth.userId, user: auth.user as Doc<"users"> };
+  } catch {
+    return { ok: false as const, response: text("Unauthorized", 401, headers) };
+  }
+}
+
+export async function requirePackagePublishAuthOrResponse(
+  ctx: ActionCtx,
+  request: Request,
+  headers: HeadersInit,
+) {
+  try {
+    return { ok: true as const, auth: await requirePackagePublishAuth(ctx, request) };
   } catch {
     return { ok: false as const, response: text("Unauthorized", 401, headers) };
   }
@@ -263,6 +276,9 @@ export async function parseMultipartPublish(
     const path = file.name;
     if (isMacJunkPath(path)) continue;
     const size = file.size;
+    if (size > MAX_PUBLISH_FILE_BYTES) {
+      throw new Error(getPublishFileSizeError(path));
+    }
     const contentType = file.type || undefined;
     const buffer = new Uint8Array(await file.arrayBuffer());
     const sha256 = await sha256Hex(buffer);

@@ -1,13 +1,12 @@
-import { TanStackDevtools } from "@tanstack/react-devtools";
-import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
-import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { createRootRoute, HeadContent, Scripts, useLocation } from "@tanstack/react-router";
 import { Analytics } from "@vercel/analytics/react";
+import { Toaster } from "sonner";
 import { AppProviders } from "../components/AppProviders";
 import { ClientOnly } from "../components/ClientOnly";
 import { DeploymentDriftBanner } from "../components/DeploymentDriftBanner";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Footer } from "../components/Footer";
 import Header from "../components/Header";
-import { isDevRuntime } from "../lib/runtimeEnv";
 import { getSiteDescription, getSiteMode, getSiteName, getSiteUrlForMode } from "../lib/site";
 import appCss from "../styles.css?url";
 
@@ -113,28 +112,33 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             <ClientOnly>
               <DeploymentDriftBanner />
             </ClientOnly>
-            {children}
+            <RouteErrorBoundary>{children}</RouteErrorBoundary>
             <Footer />
           </div>
+          <Toaster
+            position="bottom-right"
+            toastOptions={{
+              style: {
+                background: "var(--surface)",
+                color: "var(--ink)",
+                border: "1px solid var(--line)",
+                borderRadius: "var(--radius-md)",
+                fontFamily: "var(--font-body)",
+              },
+            }}
+          />
           <ClientOnly>
             <Analytics />
-            {isDevRuntime() ? (
-              <TanStackDevtools
-                config={{
-                  position: "bottom-right",
-                }}
-                plugins={[
-                  {
-                    name: "Tanstack Router",
-                    render: <TanStackRouterDevtoolsPanel />,
-                  },
-                ]}
-              />
-            ) : null}
           </ClientOnly>
         </AppProviders>
         <Scripts />
       </body>
     </html>
   );
+}
+
+/** Resets the error boundary whenever the route pathname changes. */
+function RouteErrorBoundary({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  return <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>;
 }

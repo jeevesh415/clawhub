@@ -4,6 +4,7 @@ import type { ActionCtx } from "../_generated/server";
 import { getOptionalApiTokenUserId, requireApiTokenUser } from "../lib/apiTokenAuth";
 import { applyRateLimit, parseBearerToken } from "../lib/httpRateLimit";
 import { parseBooleanQueryParam, resolveBooleanQueryParam } from "../lib/httpUtils";
+import type { LlmEvalDimension } from "../lib/securityPrompt";
 import { publishVersionForUser } from "../skills";
 import {
   MAX_RAW_FILE_BYTES,
@@ -81,6 +82,7 @@ type PublicSkillVersionResponse = {
   sha256hash?: string;
   vtAnalysis?: Doc<"skillVersions">["vtAnalysis"];
   llmAnalysis?: Doc<"skillVersions">["llmAnalysis"];
+  capabilityTags?: string[];
 };
 
 type ModerationEvidence = {
@@ -189,6 +191,7 @@ type SkillSecuritySnapshot = {
   hasScanResult: boolean;
   sha256hash: string | null;
   virustotalUrl: string | null;
+  capabilityTags: string[];
   scanners: {
     vt: {
       status: string;
@@ -204,7 +207,7 @@ type SkillSecuritySnapshot = {
       normalizedStatus: NormalizedSecurityStatus;
       confidence: string | null;
       summary: string | null;
-      dimensions: NonNullable<Doc<"skillVersions">["llmAnalysis"]>["dimensions"] | null;
+      dimensions: LlmEvalDimension[] | null;
       guidance: string | null;
       findings: string | null;
       model: string | null;
@@ -260,7 +263,7 @@ function mergeSecurityStatuses(statuses: NormalizedSecurityStatus[]) {
 }
 
 function hasLlmDimensionWarnings(
-  dimensions: NonNullable<Doc<"skillVersions">["llmAnalysis"]>["dimensions"] | undefined,
+  dimensions: LlmEvalDimension[] | undefined,
 ) {
   if (!Array.isArray(dimensions)) return false;
   return dimensions.some((dimension) => {
@@ -271,13 +274,17 @@ function hasLlmDimensionWarnings(
 }
 
 function buildSkillSecuritySnapshot(
-  version: Pick<PublicSkillVersionResponse, "sha256hash" | "vtAnalysis" | "llmAnalysis">,
+  version: Pick<
+    PublicSkillVersionResponse,
+    "sha256hash" | "vtAnalysis" | "llmAnalysis" | "capabilityTags"
+  >,
 ): SkillSecuritySnapshot | null {
+  const capabilityTags = version.capabilityTags ?? [];
   const sha256hash = version.sha256hash ?? null;
   const vt = version.vtAnalysis;
   const llm = version.llmAnalysis;
 
-  if (!sha256hash && !vt && !llm) return null;
+  if (!sha256hash && !vt && !llm && capabilityTags.length === 0) return null;
 
   const vtStatus = vt ? normalizeSecurityStatus(vt.verdict ?? vt.status) : null;
   const llmStatus = llm ? normalizeSecurityStatus(llm.verdict ?? llm.status) : null;
@@ -305,6 +312,7 @@ function buildSkillSecuritySnapshot(
     hasScanResult,
     sha256hash,
     virustotalUrl: sha256hash ? `https://www.virustotal.com/gui/file/${sha256hash}` : null,
+    capabilityTags,
     scanners: {
       vt: vt
         ? {
