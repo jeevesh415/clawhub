@@ -1,4 +1,5 @@
 import { api, internal } from "../_generated/api";
+import { normalizeTextContentType } from "clawhub-schema";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import { getOptionalApiTokenUserId, requireApiTokenUser } from "../lib/apiTokenAuth";
@@ -734,7 +735,7 @@ export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request)
             path: file.path,
             size: file.size,
             sha256: file.sha256,
-            contentType: file.contentType ?? null,
+            contentType: normalizeTextContentType(file.path, file.contentType) ?? null,
           })),
           security: security ?? undefined,
         },

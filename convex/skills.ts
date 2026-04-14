@@ -1,4 +1,5 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { normalizeTextContentType } from "clawhub-schema";
 import { getPage, type IndexKey, paginator } from "convex-helpers/server/pagination";
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v, type Value } from "convex/values";
@@ -1229,7 +1230,7 @@ function toPublicSkillVersion(
       path: file.path,
       size: file.size,
       sha256: file.sha256,
-      contentType: file.contentType,
+      contentType: normalizeTextContentType(file.path, file.contentType),
     })),
     parsed: version.parsed
       ? {
