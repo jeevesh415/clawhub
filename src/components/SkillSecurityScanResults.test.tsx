@@ -4,11 +4,20 @@ import { SecurityScanResults } from "./SkillSecurityScanResults";
 
 describe("SecurityScanResults static guidance", () => {
   it("renders capability-only states without scanner verdicts", () => {
-    render(<SecurityScanResults capabilityTags={["posts-externally", "requires-oauth-token"]} />);
+    render(
+      <SecurityScanResults
+        capabilityTags={[
+          "posts-externally",
+          "requires-oauth-token",
+          "requires-sensitive-credentials",
+        ]}
+      />,
+    );
 
     expect(screen.getByText("Capability signals")).toBeTruthy();
     expect(screen.getByText("Posts externally")).toBeTruthy();
     expect(screen.getByText("Requires OAuth token")).toBeTruthy();
+    expect(screen.getByText("Requires sensitive credentials")).toBeTruthy();
   });
 
   it("renders capability labels separately from scan verdicts", () => {

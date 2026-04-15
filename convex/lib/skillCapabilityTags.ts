@@ -4,6 +4,7 @@ export const SKILL_CAPABILITY_TAGS = [
   "can-make-purchases",
   "can-sign-transactions",
   "requires-oauth-token",
+  "requires-sensitive-credentials",
   "posts-externally",
 ] as const;
 
@@ -96,6 +97,19 @@ const OAUTH_PATTERNS = [
   /\btweet\.write\b/,
 ] satisfies RegExp[];
 
+const SENSITIVE_CREDENTIAL_PATTERNS = [
+  /api[_ -]?key\b/,
+  /\baccess token\b/,
+  /\brefresh token\b/,
+  /\bbearer token\b/,
+  /\bsession (?:cookie|cookies)\b/,
+  /\bauth(?:entication)? (?:cookie|cookies)\b/,
+  /\bprivate[_ -]?key\b/,
+  /\bmnemonic\b/,
+  /\bseed phrase\b/,
+  /\bsigner\b/,
+] satisfies RegExp[];
+
 const EXTERNAL_POST_PATTERNS = [
   /\bpost(?: a| this)? tweet\b/,
   /\breply to (?:this )?tweet\b/,
@@ -129,6 +143,7 @@ export function deriveSkillCapabilityTags(params: {
   const canMakePurchases = matches(text, PURCHASE_PATTERNS);
   const canSignTransactions = matches(text, TRANSACTION_PATTERNS);
   const requiresOauthToken = matches(text, OAUTH_PATTERNS);
+  const requiresSensitiveCredentials = matches(text, SENSITIVE_CREDENTIAL_PATTERNS);
   const postsExternally = matches(text, EXTERNAL_POST_PATTERNS);
 
   if (isCrypto) tags.add("crypto");
@@ -136,6 +151,7 @@ export function deriveSkillCapabilityTags(params: {
   if (canMakePurchases) tags.add("can-make-purchases");
   if (canSignTransactions) tags.add("can-sign-transactions");
   if (requiresOauthToken) tags.add("requires-oauth-token");
+  if (requiresSensitiveCredentials) tags.add("requires-sensitive-credentials");
   if (postsExternally) tags.add("posts-externally");
 
   if (canSignTransactions || canMakePurchases) {
@@ -143,6 +159,9 @@ export function deriveSkillCapabilityTags(params: {
   }
   if (canSignTransactions) {
     tags.add("requires-wallet");
+  }
+  if (requiresWallet || canSignTransactions || requiresOauthToken) {
+    tags.add("requires-sensitive-credentials");
   }
 
   return SKILL_CAPABILITY_TAGS.filter((tag) => tags.has(tag));

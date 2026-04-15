@@ -53,6 +53,7 @@ const SKILL_CAPABILITY_LABELS: Record<string, string> = {
   "can-make-purchases": "Payments",
   "can-sign-transactions": "Signs transactions",
   "requires-oauth-token": "OAuth",
+  "requires-sensitive-credentials": "Sensitive credentials",
   "posts-externally": "External posting",
 };
 

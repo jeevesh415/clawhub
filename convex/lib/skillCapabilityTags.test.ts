@@ -26,6 +26,7 @@ describe("deriveSkillCapabilityTags", () => {
       "requires-wallet",
       "can-make-purchases",
       "can-sign-transactions",
+      "requires-sensitive-credentials",
     ]);
   });
 
@@ -39,7 +40,24 @@ describe("deriveSkillCapabilityTags", () => {
       fileContents: [],
     });
 
-    expect(tags).toEqual(["requires-oauth-token", "posts-externally"]);
+    expect(tags).toEqual([
+      "requires-oauth-token",
+      "requires-sensitive-credentials",
+      "posts-externally",
+    ]);
+  });
+
+  it("detects non-oauth API key skills that still need sensitive credentials", () => {
+    const tags = deriveSkillCapabilityTags({
+      slug: "minimax-usage",
+      displayName: "Minimax Usage",
+      frontmatter: {},
+      readmeText:
+        "Create a .env file with MINIMAX_CODING_API_KEY and MINIMAX_GROUP_ID, then send an authorization: Bearer header to the MiniMax endpoint.",
+      fileContents: [],
+    });
+
+    expect(tags).toEqual(["requires-sensitive-credentials"]);
   });
 
   it("does not treat generic broadcast wording as a crypto transaction signal", () => {
