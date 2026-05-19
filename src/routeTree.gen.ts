@@ -18,22 +18,39 @@ import { Route as PublishPluginRouteImport } from './routes/publish-plugin'
 import { Route as ManagementRouteImport } from './routes/management'
 import { Route as ImportRouteImport } from './routes/import'
 import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as AuditsRouteImport } from './routes/audits'
 import { Route as AdminRouteImport } from './routes/admin'
-import { Route as AboutRouteImport } from './routes/about'
+import { Route as SlugRouteImport } from './routes/$slug'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as UsersIndexRouteImport } from './routes/users/index'
 import { Route as SoulsIndexRouteImport } from './routes/souls/index'
 import { Route as SkillsIndexRouteImport } from './routes/skills/index'
+import { Route as PublishersIndexRouteImport } from './routes/publishers/index'
 import { Route as PluginsIndexRouteImport } from './routes/plugins/index'
 import { Route as PackagesIndexRouteImport } from './routes/packages/index'
+import { Route as UserHandleRouteImport } from './routes/user/$handle'
 import { Route as UHandleRouteImport } from './routes/u/$handle'
 import { Route as SoulsSlugRouteImport } from './routes/souls/$slug'
+import { Route as SkillsPublishRouteImport } from './routes/skills/publish'
+import { Route as PluginsPublishRouteImport } from './routes/plugins/publish'
 import { Route as PluginsNewRouteImport } from './routes/plugins/new'
 import { Route as PluginsNameRouteImport } from './routes/plugins/$name'
 import { Route as PackagesNewRouteImport } from './routes/packages/new'
 import { Route as PackagesNameRouteImport } from './routes/packages/$name'
+import { Route as PHandleRouteImport } from './routes/p/$handle'
 import { Route as OrgsHandleRouteImport } from './routes/orgs/$handle'
+import { Route as DocsAuthRouteImport } from './routes/docs/auth'
+import { Route as CliDeviceRouteImport } from './routes/cli/device'
 import { Route as CliAuthRouteImport } from './routes/cli/auth'
 import { Route as OwnerSlugRouteImport } from './routes/$owner/$slug'
+import { Route as PluginsScopeNameRouteImport } from './routes/plugins/$scope/$name'
+import { Route as PluginsNameSettingsRouteImport } from './routes/plugins/$name/settings'
+import { Route as PackagesScopeNameRouteImport } from './routes/packages/$scope/$name'
+import { Route as OwnerSlugSettingsRouteImport } from './routes/$owner/$slug/settings'
+import { Route as PluginsScopeNameSettingsRouteImport } from './routes/plugins/$scope/$name/settings'
+import { Route as PluginsNameSecurityScannerRouteImport } from './routes/plugins/$name/security/$scanner'
+import { Route as OwnerSlugSecurityScannerRouteImport } from './routes/$owner/$slug/security/$scanner'
+import { Route as PluginsScopeNameSecurityScannerRouteImport } from './routes/plugins/$scope/$name/security/$scanner'
 
 const UploadRoute = UploadRouteImport.update({
   id: '/upload',
@@ -80,19 +97,29 @@ const DashboardRoute = DashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuditsRoute = AuditsRouteImport.update({
+  id: '/audits',
+  path: '/audits',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AdminRoute = AdminRouteImport.update({
   id: '/admin',
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AboutRoute = AboutRouteImport.update({
-  id: '/about',
-  path: '/about',
+const SlugRoute = SlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsersIndexRoute = UsersIndexRouteImport.update({
+  id: '/users/',
+  path: '/users/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SoulsIndexRoute = SoulsIndexRouteImport.update({
@@ -105,6 +132,11 @@ const SkillsIndexRoute = SkillsIndexRouteImport.update({
   path: '/skills/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PublishersIndexRoute = PublishersIndexRouteImport.update({
+  id: '/publishers/',
+  path: '/publishers/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PluginsIndexRoute = PluginsIndexRouteImport.update({
   id: '/plugins/',
   path: '/plugins/',
@@ -115,6 +147,11 @@ const PackagesIndexRoute = PackagesIndexRouteImport.update({
   path: '/packages/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const UserHandleRoute = UserHandleRouteImport.update({
+  id: '/user/$handle',
+  path: '/user/$handle',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const UHandleRoute = UHandleRouteImport.update({
   id: '/u/$handle',
   path: '/u/$handle',
@@ -123,6 +160,16 @@ const UHandleRoute = UHandleRouteImport.update({
 const SoulsSlugRoute = SoulsSlugRouteImport.update({
   id: '/souls/$slug',
   path: '/souls/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsPublishRoute = SkillsPublishRouteImport.update({
+  id: '/skills/publish',
+  path: '/skills/publish',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PluginsPublishRoute = PluginsPublishRouteImport.update({
+  id: '/plugins/publish',
+  path: '/plugins/publish',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PluginsNewRoute = PluginsNewRouteImport.update({
@@ -145,9 +192,24 @@ const PackagesNameRoute = PackagesNameRouteImport.update({
   path: '/packages/$name',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PHandleRoute = PHandleRouteImport.update({
+  id: '/p/$handle',
+  path: '/p/$handle',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OrgsHandleRoute = OrgsHandleRouteImport.update({
   id: '/orgs/$handle',
   path: '/orgs/$handle',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DocsAuthRoute = DocsAuthRouteImport.update({
+  id: '/docs/auth',
+  path: '/docs/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CliDeviceRoute = CliDeviceRouteImport.update({
+  id: '/cli/device',
+  path: '/cli/device',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CliAuthRoute = CliAuthRouteImport.update({
@@ -160,11 +222,56 @@ const OwnerSlugRoute = OwnerSlugRouteImport.update({
   path: '/$owner/$slug',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PluginsScopeNameRoute = PluginsScopeNameRouteImport.update({
+  id: '/plugins/$scope/$name',
+  path: '/plugins/$scope/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PluginsNameSettingsRoute = PluginsNameSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => PluginsNameRoute,
+} as any)
+const PackagesScopeNameRoute = PackagesScopeNameRouteImport.update({
+  id: '/packages/$scope/$name',
+  path: '/packages/$scope/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerSlugSettingsRoute = OwnerSlugSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => OwnerSlugRoute,
+} as any)
+const PluginsScopeNameSettingsRoute =
+  PluginsScopeNameSettingsRouteImport.update({
+    id: '/settings',
+    path: '/settings',
+    getParentRoute: () => PluginsScopeNameRoute,
+  } as any)
+const PluginsNameSecurityScannerRoute =
+  PluginsNameSecurityScannerRouteImport.update({
+    id: '/security/$scanner',
+    path: '/security/$scanner',
+    getParentRoute: () => PluginsNameRoute,
+  } as any)
+const OwnerSlugSecurityScannerRoute =
+  OwnerSlugSecurityScannerRouteImport.update({
+    id: '/security/$scanner',
+    path: '/security/$scanner',
+    getParentRoute: () => OwnerSlugRoute,
+  } as any)
+const PluginsScopeNameSecurityScannerRoute =
+  PluginsScopeNameSecurityScannerRouteImport.update({
+    id: '/security/$scanner',
+    path: '/security/$scanner',
+    getParentRoute: () => PluginsScopeNameRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
+  '/$slug': typeof SlugRoute
   '/admin': typeof AdminRoute
+  '/audits': typeof AuditsRoute
   '/dashboard': typeof DashboardRoute
   '/import': typeof ImportRoute
   '/management': typeof ManagementRoute
@@ -174,24 +281,41 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/stars': typeof StarsRoute
   '/upload': typeof UploadRoute
-  '/$owner/$slug': typeof OwnerSlugRoute
+  '/$owner/$slug': typeof OwnerSlugRouteWithChildren
   '/cli/auth': typeof CliAuthRoute
+  '/cli/device': typeof CliDeviceRoute
+  '/docs/auth': typeof DocsAuthRoute
   '/orgs/$handle': typeof OrgsHandleRoute
+  '/p/$handle': typeof PHandleRoute
   '/packages/$name': typeof PackagesNameRoute
   '/packages/new': typeof PackagesNewRoute
-  '/plugins/$name': typeof PluginsNameRoute
+  '/plugins/$name': typeof PluginsNameRouteWithChildren
   '/plugins/new': typeof PluginsNewRoute
+  '/plugins/publish': typeof PluginsPublishRoute
+  '/skills/publish': typeof SkillsPublishRoute
   '/souls/$slug': typeof SoulsSlugRoute
   '/u/$handle': typeof UHandleRoute
+  '/user/$handle': typeof UserHandleRoute
   '/packages/': typeof PackagesIndexRoute
   '/plugins/': typeof PluginsIndexRoute
+  '/publishers/': typeof PublishersIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/souls/': typeof SoulsIndexRoute
+  '/users/': typeof UsersIndexRoute
+  '/$owner/$slug/settings': typeof OwnerSlugSettingsRoute
+  '/packages/$scope/$name': typeof PackagesScopeNameRoute
+  '/plugins/$name/settings': typeof PluginsNameSettingsRoute
+  '/plugins/$scope/$name': typeof PluginsScopeNameRouteWithChildren
+  '/$owner/$slug/security/$scanner': typeof OwnerSlugSecurityScannerRoute
+  '/plugins/$name/security/$scanner': typeof PluginsNameSecurityScannerRoute
+  '/plugins/$scope/$name/settings': typeof PluginsScopeNameSettingsRoute
+  '/plugins/$scope/$name/security/$scanner': typeof PluginsScopeNameSecurityScannerRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
+  '/$slug': typeof SlugRoute
   '/admin': typeof AdminRoute
+  '/audits': typeof AuditsRoute
   '/dashboard': typeof DashboardRoute
   '/import': typeof ImportRoute
   '/management': typeof ManagementRoute
@@ -201,25 +325,42 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/stars': typeof StarsRoute
   '/upload': typeof UploadRoute
-  '/$owner/$slug': typeof OwnerSlugRoute
+  '/$owner/$slug': typeof OwnerSlugRouteWithChildren
   '/cli/auth': typeof CliAuthRoute
+  '/cli/device': typeof CliDeviceRoute
+  '/docs/auth': typeof DocsAuthRoute
   '/orgs/$handle': typeof OrgsHandleRoute
+  '/p/$handle': typeof PHandleRoute
   '/packages/$name': typeof PackagesNameRoute
   '/packages/new': typeof PackagesNewRoute
-  '/plugins/$name': typeof PluginsNameRoute
+  '/plugins/$name': typeof PluginsNameRouteWithChildren
   '/plugins/new': typeof PluginsNewRoute
+  '/plugins/publish': typeof PluginsPublishRoute
+  '/skills/publish': typeof SkillsPublishRoute
   '/souls/$slug': typeof SoulsSlugRoute
   '/u/$handle': typeof UHandleRoute
+  '/user/$handle': typeof UserHandleRoute
   '/packages': typeof PackagesIndexRoute
   '/plugins': typeof PluginsIndexRoute
+  '/publishers': typeof PublishersIndexRoute
   '/skills': typeof SkillsIndexRoute
   '/souls': typeof SoulsIndexRoute
+  '/users': typeof UsersIndexRoute
+  '/$owner/$slug/settings': typeof OwnerSlugSettingsRoute
+  '/packages/$scope/$name': typeof PackagesScopeNameRoute
+  '/plugins/$name/settings': typeof PluginsNameSettingsRoute
+  '/plugins/$scope/$name': typeof PluginsScopeNameRouteWithChildren
+  '/$owner/$slug/security/$scanner': typeof OwnerSlugSecurityScannerRoute
+  '/plugins/$name/security/$scanner': typeof PluginsNameSecurityScannerRoute
+  '/plugins/$scope/$name/settings': typeof PluginsScopeNameSettingsRoute
+  '/plugins/$scope/$name/security/$scanner': typeof PluginsScopeNameSecurityScannerRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
+  '/$slug': typeof SlugRoute
   '/admin': typeof AdminRoute
+  '/audits': typeof AuditsRoute
   '/dashboard': typeof DashboardRoute
   '/import': typeof ImportRoute
   '/management': typeof ManagementRoute
@@ -229,26 +370,43 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/stars': typeof StarsRoute
   '/upload': typeof UploadRoute
-  '/$owner/$slug': typeof OwnerSlugRoute
+  '/$owner/$slug': typeof OwnerSlugRouteWithChildren
   '/cli/auth': typeof CliAuthRoute
+  '/cli/device': typeof CliDeviceRoute
+  '/docs/auth': typeof DocsAuthRoute
   '/orgs/$handle': typeof OrgsHandleRoute
+  '/p/$handle': typeof PHandleRoute
   '/packages/$name': typeof PackagesNameRoute
   '/packages/new': typeof PackagesNewRoute
-  '/plugins/$name': typeof PluginsNameRoute
+  '/plugins/$name': typeof PluginsNameRouteWithChildren
   '/plugins/new': typeof PluginsNewRoute
+  '/plugins/publish': typeof PluginsPublishRoute
+  '/skills/publish': typeof SkillsPublishRoute
   '/souls/$slug': typeof SoulsSlugRoute
   '/u/$handle': typeof UHandleRoute
+  '/user/$handle': typeof UserHandleRoute
   '/packages/': typeof PackagesIndexRoute
   '/plugins/': typeof PluginsIndexRoute
+  '/publishers/': typeof PublishersIndexRoute
   '/skills/': typeof SkillsIndexRoute
   '/souls/': typeof SoulsIndexRoute
+  '/users/': typeof UsersIndexRoute
+  '/$owner/$slug/settings': typeof OwnerSlugSettingsRoute
+  '/packages/$scope/$name': typeof PackagesScopeNameRoute
+  '/plugins/$name/settings': typeof PluginsNameSettingsRoute
+  '/plugins/$scope/$name': typeof PluginsScopeNameRouteWithChildren
+  '/$owner/$slug/security/$scanner': typeof OwnerSlugSecurityScannerRoute
+  '/plugins/$name/security/$scanner': typeof PluginsNameSecurityScannerRoute
+  '/plugins/$scope/$name/settings': typeof PluginsScopeNameSettingsRoute
+  '/plugins/$scope/$name/security/$scanner': typeof PluginsScopeNameSecurityScannerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/about'
+    | '/$slug'
     | '/admin'
+    | '/audits'
     | '/dashboard'
     | '/import'
     | '/management'
@@ -260,22 +418,39 @@ export interface FileRouteTypes {
     | '/upload'
     | '/$owner/$slug'
     | '/cli/auth'
+    | '/cli/device'
+    | '/docs/auth'
     | '/orgs/$handle'
+    | '/p/$handle'
     | '/packages/$name'
     | '/packages/new'
     | '/plugins/$name'
     | '/plugins/new'
+    | '/plugins/publish'
+    | '/skills/publish'
     | '/souls/$slug'
     | '/u/$handle'
+    | '/user/$handle'
     | '/packages/'
     | '/plugins/'
+    | '/publishers/'
     | '/skills/'
     | '/souls/'
+    | '/users/'
+    | '/$owner/$slug/settings'
+    | '/packages/$scope/$name'
+    | '/plugins/$name/settings'
+    | '/plugins/$scope/$name'
+    | '/$owner/$slug/security/$scanner'
+    | '/plugins/$name/security/$scanner'
+    | '/plugins/$scope/$name/settings'
+    | '/plugins/$scope/$name/security/$scanner'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/about'
+    | '/$slug'
     | '/admin'
+    | '/audits'
     | '/dashboard'
     | '/import'
     | '/management'
@@ -287,22 +462,39 @@ export interface FileRouteTypes {
     | '/upload'
     | '/$owner/$slug'
     | '/cli/auth'
+    | '/cli/device'
+    | '/docs/auth'
     | '/orgs/$handle'
+    | '/p/$handle'
     | '/packages/$name'
     | '/packages/new'
     | '/plugins/$name'
     | '/plugins/new'
+    | '/plugins/publish'
+    | '/skills/publish'
     | '/souls/$slug'
     | '/u/$handle'
+    | '/user/$handle'
     | '/packages'
     | '/plugins'
+    | '/publishers'
     | '/skills'
     | '/souls'
+    | '/users'
+    | '/$owner/$slug/settings'
+    | '/packages/$scope/$name'
+    | '/plugins/$name/settings'
+    | '/plugins/$scope/$name'
+    | '/$owner/$slug/security/$scanner'
+    | '/plugins/$name/security/$scanner'
+    | '/plugins/$scope/$name/settings'
+    | '/plugins/$scope/$name/security/$scanner'
   id:
     | '__root__'
     | '/'
-    | '/about'
+    | '/$slug'
     | '/admin'
+    | '/audits'
     | '/dashboard'
     | '/import'
     | '/management'
@@ -314,23 +506,40 @@ export interface FileRouteTypes {
     | '/upload'
     | '/$owner/$slug'
     | '/cli/auth'
+    | '/cli/device'
+    | '/docs/auth'
     | '/orgs/$handle'
+    | '/p/$handle'
     | '/packages/$name'
     | '/packages/new'
     | '/plugins/$name'
     | '/plugins/new'
+    | '/plugins/publish'
+    | '/skills/publish'
     | '/souls/$slug'
     | '/u/$handle'
+    | '/user/$handle'
     | '/packages/'
     | '/plugins/'
+    | '/publishers/'
     | '/skills/'
     | '/souls/'
+    | '/users/'
+    | '/$owner/$slug/settings'
+    | '/packages/$scope/$name'
+    | '/plugins/$name/settings'
+    | '/plugins/$scope/$name'
+    | '/$owner/$slug/security/$scanner'
+    | '/plugins/$name/security/$scanner'
+    | '/plugins/$scope/$name/settings'
+    | '/plugins/$scope/$name/security/$scanner'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AboutRoute: typeof AboutRoute
+  SlugRoute: typeof SlugRoute
   AdminRoute: typeof AdminRoute
+  AuditsRoute: typeof AuditsRoute
   DashboardRoute: typeof DashboardRoute
   ImportRoute: typeof ImportRoute
   ManagementRoute: typeof ManagementRoute
@@ -340,19 +549,29 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   StarsRoute: typeof StarsRoute
   UploadRoute: typeof UploadRoute
-  OwnerSlugRoute: typeof OwnerSlugRoute
+  OwnerSlugRoute: typeof OwnerSlugRouteWithChildren
   CliAuthRoute: typeof CliAuthRoute
+  CliDeviceRoute: typeof CliDeviceRoute
+  DocsAuthRoute: typeof DocsAuthRoute
   OrgsHandleRoute: typeof OrgsHandleRoute
+  PHandleRoute: typeof PHandleRoute
   PackagesNameRoute: typeof PackagesNameRoute
   PackagesNewRoute: typeof PackagesNewRoute
-  PluginsNameRoute: typeof PluginsNameRoute
+  PluginsNameRoute: typeof PluginsNameRouteWithChildren
   PluginsNewRoute: typeof PluginsNewRoute
+  PluginsPublishRoute: typeof PluginsPublishRoute
+  SkillsPublishRoute: typeof SkillsPublishRoute
   SoulsSlugRoute: typeof SoulsSlugRoute
   UHandleRoute: typeof UHandleRoute
+  UserHandleRoute: typeof UserHandleRoute
   PackagesIndexRoute: typeof PackagesIndexRoute
   PluginsIndexRoute: typeof PluginsIndexRoute
+  PublishersIndexRoute: typeof PublishersIndexRoute
   SkillsIndexRoute: typeof SkillsIndexRoute
   SoulsIndexRoute: typeof SoulsIndexRoute
+  UsersIndexRoute: typeof UsersIndexRoute
+  PackagesScopeNameRoute: typeof PackagesScopeNameRoute
+  PluginsScopeNameRoute: typeof PluginsScopeNameRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -420,6 +639,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/audits': {
+      id: '/audits'
+      path: '/audits'
+      fullPath: '/audits'
+      preLoaderRoute: typeof AuditsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/admin': {
       id: '/admin'
       path: '/admin'
@@ -427,11 +653,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/about': {
-      id: '/about'
-      path: '/about'
-      fullPath: '/about'
-      preLoaderRoute: typeof AboutRouteImport
+    '/$slug': {
+      id: '/$slug'
+      path: '/$slug'
+      fullPath: '/$slug'
+      preLoaderRoute: typeof SlugRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -439,6 +665,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/users/': {
+      id: '/users/'
+      path: '/users'
+      fullPath: '/users/'
+      preLoaderRoute: typeof UsersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/souls/': {
@@ -455,6 +688,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SkillsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/publishers/': {
+      id: '/publishers/'
+      path: '/publishers'
+      fullPath: '/publishers/'
+      preLoaderRoute: typeof PublishersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/plugins/': {
       id: '/plugins/'
       path: '/plugins'
@@ -469,6 +709,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PackagesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/user/$handle': {
+      id: '/user/$handle'
+      path: '/user/$handle'
+      fullPath: '/user/$handle'
+      preLoaderRoute: typeof UserHandleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/u/$handle': {
       id: '/u/$handle'
       path: '/u/$handle'
@@ -481,6 +728,20 @@ declare module '@tanstack/react-router' {
       path: '/souls/$slug'
       fullPath: '/souls/$slug'
       preLoaderRoute: typeof SoulsSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/publish': {
+      id: '/skills/publish'
+      path: '/skills/publish'
+      fullPath: '/skills/publish'
+      preLoaderRoute: typeof SkillsPublishRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/plugins/publish': {
+      id: '/plugins/publish'
+      path: '/plugins/publish'
+      fullPath: '/plugins/publish'
+      preLoaderRoute: typeof PluginsPublishRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/plugins/new': {
@@ -511,11 +772,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PackagesNameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/p/$handle': {
+      id: '/p/$handle'
+      path: '/p/$handle'
+      fullPath: '/p/$handle'
+      preLoaderRoute: typeof PHandleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/orgs/$handle': {
       id: '/orgs/$handle'
       path: '/orgs/$handle'
       fullPath: '/orgs/$handle'
       preLoaderRoute: typeof OrgsHandleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/docs/auth': {
+      id: '/docs/auth'
+      path: '/docs/auth'
+      fullPath: '/docs/auth'
+      preLoaderRoute: typeof DocsAuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cli/device': {
+      id: '/cli/device'
+      path: '/cli/device'
+      fullPath: '/cli/device'
+      preLoaderRoute: typeof CliDeviceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/cli/auth': {
@@ -532,13 +814,111 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerSlugRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/plugins/$scope/$name': {
+      id: '/plugins/$scope/$name'
+      path: '/plugins/$scope/$name'
+      fullPath: '/plugins/$scope/$name'
+      preLoaderRoute: typeof PluginsScopeNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/plugins/$name/settings': {
+      id: '/plugins/$name/settings'
+      path: '/settings'
+      fullPath: '/plugins/$name/settings'
+      preLoaderRoute: typeof PluginsNameSettingsRouteImport
+      parentRoute: typeof PluginsNameRoute
+    }
+    '/packages/$scope/$name': {
+      id: '/packages/$scope/$name'
+      path: '/packages/$scope/$name'
+      fullPath: '/packages/$scope/$name'
+      preLoaderRoute: typeof PackagesScopeNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$slug/settings': {
+      id: '/$owner/$slug/settings'
+      path: '/settings'
+      fullPath: '/$owner/$slug/settings'
+      preLoaderRoute: typeof OwnerSlugSettingsRouteImport
+      parentRoute: typeof OwnerSlugRoute
+    }
+    '/plugins/$scope/$name/settings': {
+      id: '/plugins/$scope/$name/settings'
+      path: '/settings'
+      fullPath: '/plugins/$scope/$name/settings'
+      preLoaderRoute: typeof PluginsScopeNameSettingsRouteImport
+      parentRoute: typeof PluginsScopeNameRoute
+    }
+    '/plugins/$name/security/$scanner': {
+      id: '/plugins/$name/security/$scanner'
+      path: '/security/$scanner'
+      fullPath: '/plugins/$name/security/$scanner'
+      preLoaderRoute: typeof PluginsNameSecurityScannerRouteImport
+      parentRoute: typeof PluginsNameRoute
+    }
+    '/$owner/$slug/security/$scanner': {
+      id: '/$owner/$slug/security/$scanner'
+      path: '/security/$scanner'
+      fullPath: '/$owner/$slug/security/$scanner'
+      preLoaderRoute: typeof OwnerSlugSecurityScannerRouteImport
+      parentRoute: typeof OwnerSlugRoute
+    }
+    '/plugins/$scope/$name/security/$scanner': {
+      id: '/plugins/$scope/$name/security/$scanner'
+      path: '/security/$scanner'
+      fullPath: '/plugins/$scope/$name/security/$scanner'
+      preLoaderRoute: typeof PluginsScopeNameSecurityScannerRouteImport
+      parentRoute: typeof PluginsScopeNameRoute
+    }
   }
 }
 
+interface OwnerSlugRouteChildren {
+  OwnerSlugSettingsRoute: typeof OwnerSlugSettingsRoute
+  OwnerSlugSecurityScannerRoute: typeof OwnerSlugSecurityScannerRoute
+}
+
+const OwnerSlugRouteChildren: OwnerSlugRouteChildren = {
+  OwnerSlugSettingsRoute: OwnerSlugSettingsRoute,
+  OwnerSlugSecurityScannerRoute: OwnerSlugSecurityScannerRoute,
+}
+
+const OwnerSlugRouteWithChildren = OwnerSlugRoute._addFileChildren(
+  OwnerSlugRouteChildren,
+)
+
+interface PluginsNameRouteChildren {
+  PluginsNameSettingsRoute: typeof PluginsNameSettingsRoute
+  PluginsNameSecurityScannerRoute: typeof PluginsNameSecurityScannerRoute
+}
+
+const PluginsNameRouteChildren: PluginsNameRouteChildren = {
+  PluginsNameSettingsRoute: PluginsNameSettingsRoute,
+  PluginsNameSecurityScannerRoute: PluginsNameSecurityScannerRoute,
+}
+
+const PluginsNameRouteWithChildren = PluginsNameRoute._addFileChildren(
+  PluginsNameRouteChildren,
+)
+
+interface PluginsScopeNameRouteChildren {
+  PluginsScopeNameSettingsRoute: typeof PluginsScopeNameSettingsRoute
+  PluginsScopeNameSecurityScannerRoute: typeof PluginsScopeNameSecurityScannerRoute
+}
+
+const PluginsScopeNameRouteChildren: PluginsScopeNameRouteChildren = {
+  PluginsScopeNameSettingsRoute: PluginsScopeNameSettingsRoute,
+  PluginsScopeNameSecurityScannerRoute: PluginsScopeNameSecurityScannerRoute,
+}
+
+const PluginsScopeNameRouteWithChildren =
+  PluginsScopeNameRoute._addFileChildren(PluginsScopeNameRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AboutRoute: AboutRoute,
+  SlugRoute: SlugRoute,
   AdminRoute: AdminRoute,
+  AuditsRoute: AuditsRoute,
   DashboardRoute: DashboardRoute,
   ImportRoute: ImportRoute,
   ManagementRoute: ManagementRoute,
@@ -548,19 +928,29 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   StarsRoute: StarsRoute,
   UploadRoute: UploadRoute,
-  OwnerSlugRoute: OwnerSlugRoute,
+  OwnerSlugRoute: OwnerSlugRouteWithChildren,
   CliAuthRoute: CliAuthRoute,
+  CliDeviceRoute: CliDeviceRoute,
+  DocsAuthRoute: DocsAuthRoute,
   OrgsHandleRoute: OrgsHandleRoute,
+  PHandleRoute: PHandleRoute,
   PackagesNameRoute: PackagesNameRoute,
   PackagesNewRoute: PackagesNewRoute,
-  PluginsNameRoute: PluginsNameRoute,
+  PluginsNameRoute: PluginsNameRouteWithChildren,
   PluginsNewRoute: PluginsNewRoute,
+  PluginsPublishRoute: PluginsPublishRoute,
+  SkillsPublishRoute: SkillsPublishRoute,
   SoulsSlugRoute: SoulsSlugRoute,
   UHandleRoute: UHandleRoute,
+  UserHandleRoute: UserHandleRoute,
   PackagesIndexRoute: PackagesIndexRoute,
   PluginsIndexRoute: PluginsIndexRoute,
+  PublishersIndexRoute: PublishersIndexRoute,
   SkillsIndexRoute: SkillsIndexRoute,
   SoulsIndexRoute: SoulsIndexRoute,
+  UsersIndexRoute: UsersIndexRoute,
+  PackagesScopeNameRoute: PackagesScopeNameRoute,
+  PluginsScopeNameRoute: PluginsScopeNameRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

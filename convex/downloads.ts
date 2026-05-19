@@ -12,6 +12,7 @@ const HOUR_MS = 3_600_000;
 const DEDUPE_RETENTION_MS = 7 * 24 * HOUR_MS;
 const PRUNE_BATCH_SIZE = 200;
 const PRUNE_MAX_BATCHES = 50;
+const DOWNLOAD_STAT_JITTER_MS = 60_000;
 
 export async function downloadZipHandler(
   ctx: Parameters<Parameters<typeof httpAction>[0]>[0],
@@ -44,7 +45,7 @@ export async function downloadZipHandler(
   const mod = skillResult.moderationInfo;
   if (mod?.isMalwareBlocked) {
     return new Response(
-      "Blocked: this skill has been flagged as malicious by VirusTotal and cannot be downloaded.",
+      "Blocked: this skill has been flagged as malicious by ClawScan and cannot be downloaded.",
       {
         status: 403,
         headers: mergeHeaders(rate.headers, corsHeaders()),
@@ -53,7 +54,7 @@ export async function downloadZipHandler(
   }
   if (mod?.isPendingScan) {
     return new Response(
-      "This skill is pending a security scan by VirusTotal. Please try again in a few minutes.",
+      "This skill is pending a ClawScan security review. Please try again in a few minutes.",
       {
         status: 423,
         headers: mergeHeaders(rate.headers, corsHeaders()),
@@ -124,11 +125,15 @@ export async function downloadZipHandler(
     const userId = await getOptionalApiTokenUserId(ctx, request);
     const identity = getDownloadIdentityValue(request, userId ? String(userId) : null);
     if (identity) {
-      await ctx.runMutation(internal.downloads.recordDownloadInternal, {
-        skillId: skill._id,
-        identityHash: await hashToken(identity),
-        hourStart: getHourStart(Date.now()),
-      });
+      await ctx.scheduler.runAfter(
+        Math.floor(Math.random() * DOWNLOAD_STAT_JITTER_MS),
+        internal.downloads.recordDownloadInternal,
+        {
+          skillId: skill._id,
+          identityHash: await hashToken(identity),
+          hourStart: getHourStart(Date.now()),
+        },
+      );
     }
   } catch {
     // Best-effort metric path; do not fail downloads.
@@ -165,7 +170,7 @@ export const recordDownloadInternal = internalMutation({
           .eq("identityHash", args.identityHash)
           .eq("hourStart", args.hourStart),
       )
-      .unique();
+      .first();
     if (existing) return;
 
     await ctx.db.insert("downloadDedupes", {

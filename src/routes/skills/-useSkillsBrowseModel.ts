@@ -8,16 +8,30 @@ import type { SkillListEntry, SkillSearchEntry } from "./-types";
 
 const pageSize = 25;
 
-type SkillsView = "cards" | "list";
+function isNavigationAbortError(err: unknown) {
+  if (!(err instanceof Error)) return false;
+  return (
+    err.name === "AbortError" || err.message === "Failed to fetch" || err.message === "Load failed"
+  );
+}
+
+export type SkillsView = "grid" | "list";
+type LegacySkillsView = SkillsView | "cards";
+
+export function normalizeSkillsView(value: unknown): SkillsView | undefined {
+  if (value === "list") return "list";
+  if (value === "grid" || value === "cards") return "grid";
+  return undefined;
+}
 
 export type SkillsSearchState = {
   q?: string;
   sort?: SortKey;
   dir?: SortDir;
   highlighted?: boolean;
-  nonSuspicious?: boolean;
+  featured?: boolean;
   tag?: string;
-  view?: SkillsView;
+  view?: LegacySkillsView;
   focus?: "search";
 };
 
@@ -56,9 +70,8 @@ export function useSkillsBrowseModel({
   const loadMoreInFlightRef = useRef(false);
   const navigateTimer = useRef<number>(0);
 
-  const view: SkillsView = search.view ?? "list";
-  const highlightedOnly = search.highlighted ?? false;
-  const nonSuspiciousOnly = search.nonSuspicious ?? false;
+  const view: SkillsView = normalizeSkillsView(search.view) ?? "list";
+  const featuredOnly = search.featured ?? search.highlighted ?? false;
   const capabilityTag = search.tag;
   const searchSkills = useAction(api.search.searchSkills);
 
@@ -72,7 +85,7 @@ export function useSkillsBrowseModel({
   const listSort = toListSort(sort);
   const dir = parseDir(search.dir, sort);
   const searchKey = trimmedQuery
-    ? `${trimmedQuery}::${highlightedOnly ? "1" : "0"}::${nonSuspiciousOnly ? "1" : "0"}::${capabilityTag ?? ""}`
+    ? `${trimmedQuery}::${featuredOnly ? "1" : "0"}::${capabilityTag ?? ""}`
     : "";
 
   // One-shot paginated fetches (no reactive subscription)
@@ -89,8 +102,7 @@ export function useSkillsBrowseModel({
           numItems: pageSize,
           sort: listSort,
           dir,
-          highlightedOnly,
-          nonSuspiciousOnly,
+          highlightedOnly: featuredOnly,
           capabilityTag,
         });
         if (generation !== fetchGeneration.current) return;
@@ -100,23 +112,30 @@ export function useSkillsBrowseModel({
         setListStatus(canAdvance ? "idle" : "done");
       } catch (err) {
         if (generation !== fetchGeneration.current) return;
-        console.error("Failed to fetch skills page:", err);
+        if (!isNavigationAbortError(err)) {
+          console.error("Failed to fetch skills page:", err);
+        }
         // Reset to idle so the user can retry via "Load more"
         setListStatus(cursor ? "idle" : "done");
       }
     },
-    [capabilityTag, dir, highlightedOnly, listSort, nonSuspiciousOnly],
+    [capabilityTag, dir, featuredOnly, listSort],
   );
 
   // Reset and fetch first page when sort/dir/filters change
   useEffect(() => {
-    if (hasQuery) return;
+    if (hasQuery) {
+      return () => {};
+    }
     fetchGeneration.current += 1;
     const generation = fetchGeneration.current;
     setListResults([]);
     setListCursor(null);
     setListStatus("loading");
     void fetchPage(null, generation);
+    return () => {
+      fetchGeneration.current += 1;
+    };
   }, [hasQuery, fetchPage]);
 
   const isLoadingList = listStatus === "loading";
@@ -146,7 +165,7 @@ export function useSkillsBrowseModel({
   }, [searchKey]);
 
   useEffect(() => {
-    if (!hasQuery) return;
+    if (!hasQuery) return () => {};
     searchRequest.current += 1;
     const requestId = searchRequest.current;
     setIsSearching(true);
@@ -155,8 +174,7 @@ export function useSkillsBrowseModel({
         try {
           const data = (await searchSkills({
             query: trimmedQuery,
-            highlightedOnly,
-            nonSuspiciousOnly,
+            highlightedOnly: featuredOnly,
             capabilityTag,
             limit: searchLimit,
           })) as Array<SkillSearchEntry>;
@@ -171,15 +189,7 @@ export function useSkillsBrowseModel({
       })();
     }, 220);
     return () => window.clearTimeout(handle);
-  }, [
-    capabilityTag,
-    hasQuery,
-    highlightedOnly,
-    nonSuspiciousOnly,
-    searchLimit,
-    searchSkills,
-    trimmedQuery,
-  ]);
+  }, [capabilityTag, hasQuery, featuredOnly, searchLimit, searchSkills, trimmedQuery]);
 
   const baseItems = useMemo(() => {
     if (hasQuery) {
@@ -197,7 +207,8 @@ export function useSkillsBrowseModel({
   const sorted = useMemo(() => {
     if (isOtherCategory) {
       return baseItems.filter((entry) => {
-        const text = `${entry.skill.displayName} ${entry.skill.summary ?? ""} ${entry.skill.slug}`.toLowerCase();
+        const text =
+          `${entry.skill.displayName} ${entry.skill.summary ?? ""} ${entry.skill.slug}`.toLowerCase();
         return !ALL_CATEGORY_KEYWORDS.some((kw) => text.includes(kw));
       });
     }
@@ -269,9 +280,9 @@ export function useSkillsBrowseModel({
   }, [isLoadingMore]);
 
   useEffect(() => {
-    if (!canLoadMore || typeof IntersectionObserver === "undefined") return;
+    if (!canLoadMore || typeof IntersectionObserver === "undefined") return () => {};
     const target = loadMoreRef.current;
-    if (!target) return;
+    if (!target) return () => {};
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
@@ -319,21 +330,12 @@ export function useSkillsBrowseModel({
     [navigate],
   );
 
-  const onToggleHighlighted = useCallback(() => {
+  const onToggleFeatured = useCallback(() => {
     void navigate({
       search: (prev) => ({
         ...prev,
-        highlighted: prev.highlighted ? undefined : true,
-      }),
-      replace: true,
-    });
-  }, [navigate]);
-
-  const onToggleNonSuspicious = useCallback(() => {
-    void navigate({
-      search: (prev) => ({
-        ...prev,
-        nonSuspicious: prev.nonSuspicious ? undefined : true,
+        featured: prev.featured || prev.highlighted ? undefined : true,
+        highlighted: undefined,
       }),
       replace: true,
     });
@@ -368,15 +370,14 @@ export function useSkillsBrowseModel({
     void navigate({
       search: (prev) => ({
         ...prev,
-        view: prev.view === "cards" ? undefined : "cards",
+        view: normalizeSkillsView(prev.view) === "grid" ? undefined : "grid",
       }),
       replace: true,
     });
   }, [navigate]);
 
   const activeFilters: string[] = [];
-  if (highlightedOnly) activeFilters.push("highlighted");
-  if (nonSuspiciousOnly) activeFilters.push("non-suspicious");
+  if (featuredOnly) activeFilters.push("featured");
   if (capabilityTag) activeFilters.push(SKILL_CAPABILITY_LABELS[capabilityTag] ?? capabilityTag);
 
   const onCapabilityTagChange = useCallback(
@@ -399,18 +400,16 @@ export function useSkillsBrowseModel({
     canLoadMore,
     dir,
     hasQuery,
-    highlightedOnly,
+    featuredOnly,
     isLoadingMore,
     isLoadingSkills,
     loadMore,
     loadMoreRef,
-    nonSuspiciousOnly,
     onCapabilityTagChange,
     onQueryChange,
     onSortChange,
     onToggleDir,
-    onToggleHighlighted,
-    onToggleNonSuspicious,
+    onToggleFeatured,
     onToggleView,
     query,
     sort,

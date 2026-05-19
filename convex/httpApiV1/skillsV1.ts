@@ -1,14 +1,27 @@
+import {
+  SkillAppealRequestSchema,
+  SkillAppealResolveRequestSchema,
+  SkillReportTriageRequestSchema,
+  normalizeTextContentType,
+  parseArk,
+  type SkillAppealListStatus,
+  type SkillReportListStatus,
+} from "clawhub-schema";
 import { api, internal } from "../_generated/api";
-import { normalizeTextContentType } from "clawhub-schema";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import { getOptionalApiTokenUserId, requireApiTokenUser } from "../lib/apiTokenAuth";
-import { applyRateLimit, parseBearerToken } from "../lib/httpRateLimit";
+import { applyRateLimit } from "../lib/httpRateLimit";
 import { parseBooleanQueryParam, resolveBooleanQueryParam } from "../lib/httpUtils";
-import type { LlmEvalDimension } from "../lib/securityPrompt";
+import type {
+  LlmAgenticRiskFinding,
+  LlmEvalDimension,
+  LlmRiskSummary,
+} from "../lib/securityPrompt";
 import { publishVersionForUser } from "../skills";
 import {
   MAX_RAW_FILE_BYTES,
+  formatAuthzMessage,
   getPathSegments,
   json,
   parseJsonPayload,
@@ -31,6 +44,12 @@ type SearchSkillEntry = {
     updatedAt?: number;
   } | null;
   version: { version?: string; createdAt?: number } | null;
+  ownerHandle?: string | null;
+  owner?: {
+    handle?: string | null;
+    displayName?: string | null;
+    image?: string | null;
+  } | null;
 };
 
 type ListSkillsResult = {
@@ -47,6 +66,7 @@ type ListSkillsResult = {
       latestVersionId?: Id<"skillVersions">;
     };
     latestVersion: {
+      _id: Id<"skillVersions">;
       version: string;
       createdAt: number;
       changelog: string;
@@ -71,6 +91,11 @@ type PublicSkillVersionParsed = {
   clawdis?: { os?: string[]; nix?: { plugin?: boolean; systems?: string[] } };
 };
 
+type PublicSkillVersionStaticScan = Pick<
+  NonNullable<Doc<"skillVersions">["staticScan"]>,
+  "status" | "reasonCodes" | "summary" | "engineVersion" | "checkedAt"
+>;
+
 type PublicSkillVersionResponse = {
   _id: Id<"skillVersions">;
   version: string;
@@ -83,6 +108,7 @@ type PublicSkillVersionResponse = {
   sha256hash?: string;
   vtAnalysis?: Doc<"skillVersions">["vtAnalysis"];
   llmAnalysis?: Doc<"skillVersions">["llmAnalysis"];
+  staticScan?: PublicSkillVersionStaticScan;
   capabilityTags?: string[];
 };
 
@@ -194,6 +220,14 @@ type SkillSecuritySnapshot = {
   virustotalUrl: string | null;
   capabilityTags: string[];
   scanners: {
+    static: {
+      status: string;
+      normalizedStatus: NormalizedSecurityStatus;
+      reasonCodes: string[];
+      summary: string | null;
+      engineVersion: string | null;
+      checkedAt: number | null;
+    } | null;
     vt: {
       status: string;
       verdict: string | null;
@@ -211,11 +245,32 @@ type SkillSecuritySnapshot = {
       dimensions: LlmEvalDimension[] | null;
       guidance: string | null;
       findings: string | null;
+      agenticRiskFindings: LlmAgenticRiskFinding[] | null;
+      riskSummary: LlmRiskSummary | null;
       model: string | null;
       checkedAt: number | null;
     } | null;
   };
 };
+
+const internalRefs = internal as unknown as {
+  skills: {
+    reportSkillForUserInternal: unknown;
+    listSkillReportsInternal: unknown;
+    triageSkillReportForUserInternal: unknown;
+    submitSkillAppealForUserInternal: unknown;
+    listSkillAppealsInternal: unknown;
+    resolveSkillAppealForUserInternal: unknown;
+  };
+};
+
+async function runQueryRef<T>(ctx: ActionCtx, ref: unknown, args: unknown): Promise<T> {
+  return (await ctx.runQuery(ref as never, args as never)) as T;
+}
+
+async function runMutationRef<T>(ctx: ActionCtx, ref: unknown, args: unknown): Promise<T> {
+  return (await ctx.runMutation(ref as never, args as never)) as T;
+}
 
 function isDefinitiveSecurityStatus(
   status: NormalizedSecurityStatus | null | undefined,
@@ -263,9 +318,7 @@ function mergeSecurityStatuses(statuses: NormalizedSecurityStatus[]) {
   );
 }
 
-function hasLlmDimensionWarnings(
-  dimensions: LlmEvalDimension[] | undefined,
-) {
+function hasLlmDimensionWarnings(dimensions: LlmEvalDimension[] | undefined) {
   if (!Array.isArray(dimensions)) return false;
   return dimensions.some((dimension) => {
     if (!dimension || typeof dimension !== "object") return false;
@@ -277,30 +330,35 @@ function hasLlmDimensionWarnings(
 function buildSkillSecuritySnapshot(
   version: Pick<
     PublicSkillVersionResponse,
-    "sha256hash" | "vtAnalysis" | "llmAnalysis" | "capabilityTags"
+    "sha256hash" | "vtAnalysis" | "llmAnalysis" | "staticScan" | "capabilityTags"
   >,
 ): SkillSecuritySnapshot | null {
   const capabilityTags = version.capabilityTags ?? [];
   const sha256hash = version.sha256hash ?? null;
   const vt = version.vtAnalysis;
   const llm = version.llmAnalysis;
+  const staticScan = version.staticScan;
 
-  if (!sha256hash && !vt && !llm && capabilityTags.length === 0) return null;
+  if (!sha256hash && !vt && !llm && !staticScan && capabilityTags.length === 0) return null;
 
+  const staticStatus =
+    staticScan?.status?.trim().toLowerCase() === "malicious"
+      ? ("malicious" satisfies NormalizedSecurityStatus)
+      : null;
   const vtStatus = vt ? normalizeSecurityStatus(vt.verdict ?? vt.status) : null;
   const llmStatus = llm ? normalizeSecurityStatus(llm.verdict ?? llm.status) : null;
 
   const statuses: NormalizedSecurityStatus[] = [];
-  if (vtStatus) statuses.push(vtStatus);
+  if (staticStatus) statuses.push(staticStatus);
   if (llmStatus) statuses.push(llmStatus);
   if (statuses.length === 0 && sha256hash) statuses.push("pending");
   const status = mergeSecurityStatuses(statuses);
   const hasScanResult =
-    isDefinitiveSecurityStatus(vtStatus) || isDefinitiveSecurityStatus(llmStatus);
+    isDefinitiveSecurityStatus(staticStatus) || isDefinitiveSecurityStatus(llmStatus);
   const hasWarnings =
     status === "suspicious" || status === "malicious" || hasLlmDimensionWarnings(llm?.dimensions);
 
-  const checkedAtCandidates = [vt?.checkedAt, llm?.checkedAt].filter(
+  const checkedAtCandidates = [staticScan?.checkedAt, vt?.checkedAt, llm?.checkedAt].filter(
     (value): value is number => typeof value === "number",
   );
   const checkedAt = checkedAtCandidates.length > 0 ? Math.max(...checkedAtCandidates) : null;
@@ -315,6 +373,16 @@ function buildSkillSecuritySnapshot(
     virustotalUrl: sha256hash ? `https://www.virustotal.com/gui/file/${sha256hash}` : null,
     capabilityTags,
     scanners: {
+      static: staticScan
+        ? {
+            status: staticScan.status,
+            normalizedStatus: staticStatus ?? "pending",
+            reasonCodes: staticScan.reasonCodes ?? [],
+            summary: staticScan.summary ?? null,
+            engineVersion: staticScan.engineVersion ?? null,
+            checkedAt: staticScan.checkedAt ?? null,
+          }
+        : null,
       vt: vt
         ? {
             status: vt.status,
@@ -335,6 +403,8 @@ function buildSkillSecuritySnapshot(
             dimensions: llm.dimensions ?? null,
             guidance: llm.guidance ?? null,
             findings: llm.findings ?? null,
+            agenticRiskFindings: llm.agenticRiskFindings ?? null,
+            riskSummary: llm.riskSummary ?? null,
             model: llm.model ?? null,
             checkedAt: llm.checkedAt ?? null,
           }
@@ -367,14 +437,25 @@ export async function searchSkillsV1Handler(ctx: ActionCtx, request: Request) {
 
   return json(
     {
-      results: results.map((result) => ({
-        score: result.score,
-        slug: result.skill?.slug,
-        displayName: result.skill?.displayName,
-        summary: result.skill?.summary ?? null,
-        version: result.version?.version ?? null,
-        updatedAt: result.skill?.updatedAt,
-      })),
+      results: results.map((result) => {
+        const owner = result.owner
+          ? {
+              handle: result.owner.handle ?? null,
+              displayName: result.owner.displayName ?? null,
+              image: result.owner.image ?? null,
+            }
+          : null;
+        return {
+          score: result.score,
+          slug: result.skill?.slug,
+          displayName: result.skill?.displayName,
+          summary: result.skill?.summary ?? null,
+          version: result.version?.version ?? null,
+          updatedAt: result.skill?.updatedAt,
+          ownerHandle: result.ownerHandle ?? owner?.handle ?? null,
+          owner,
+        };
+      }),
     },
     200,
     rate.headers,
@@ -402,6 +483,7 @@ export async function resolveSkillVersionV1Handler(ctx: ActionCtx, request: Requ
 }
 
 type SkillListSort =
+  | "createdAt"
   | "updated"
   | "downloads"
   | "stars"
@@ -409,8 +491,14 @@ type SkillListSort =
   | "installsAllTime"
   | "trending";
 
-function parseListSort(value: string | null): SkillListSort {
+type PublicListSort = "newest" | "updated" | "downloads" | "stars" | "installs";
+
+function parseListSort(value: string | null): SkillListSort | null {
+  if (value === null) return "updated";
   const normalized = value?.trim().toLowerCase();
+  if (normalized === "createdat" || normalized === "created-at" || normalized === "newest") {
+    return "createdAt";
+  }
   if (normalized === "downloads") return "downloads";
   if (normalized === "stars" || normalized === "rating") return "stars";
   if (
@@ -425,7 +513,15 @@ function parseListSort(value: string | null): SkillListSort {
     return "installsAllTime";
   }
   if (normalized === "trending") return "trending";
-  return "updated";
+  if (normalized === "updated") return "updated";
+  return null;
+}
+
+function toPublicListSort(sort: Exclude<SkillListSort, "trending">): PublicListSort {
+  if (sort === "createdAt") return "newest";
+  if (sort === "updated") return "updated";
+  if (sort === "downloads" || sort === "stars") return sort;
+  return "installs";
 }
 
 export async function listSkillsV1Handler(ctx: ActionCtx, request: Request) {
@@ -436,23 +532,41 @@ export async function listSkillsV1Handler(ctx: ActionCtx, request: Request) {
   const limit = toOptionalNumber(url.searchParams.get("limit"));
   const rawCursor = url.searchParams.get("cursor")?.trim() || undefined;
   const sort = parseListSort(url.searchParams.get("sort"));
+  if (!sort) return text("Invalid sort query parameter", 400, rate.headers);
   const cursor = sort === "trending" ? undefined : rawCursor;
   const nonSuspiciousOnly = resolveBooleanQueryParam(
     url.searchParams.get("nonSuspiciousOnly"),
     url.searchParams.get("nonSuspicious"),
   );
 
-  const result = (await ctx.runQuery(api.skills.listPublicPage, {
-    limit,
-    cursor,
-    sort,
-    nonSuspiciousOnly: nonSuspiciousOnly || undefined,
-  })) as ListSkillsResult;
+  let result: ListSkillsResult;
+  if (sort === "trending") {
+    result = (await ctx.runQuery(api.skills.listPublicTrendingPage, {
+      limit,
+      nonSuspiciousOnly: nonSuspiciousOnly || undefined,
+    })) as ListSkillsResult;
+  } else {
+    const pageResult = (await ctx.runQuery(api.skills.listPublicApiPageV1, {
+      cursor,
+      numItems: limit,
+      sort: toPublicListSort(sort),
+      nonSuspiciousOnly: nonSuspiciousOnly || undefined,
+    })) as {
+      items?: ListSkillsResult["items"];
+      page?: ListSkillsResult["items"];
+      nextCursor?: string | null;
+    };
+    result = {
+      items: pageResult.items ?? pageResult.page ?? [],
+      nextCursor: pageResult.nextCursor ?? null,
+    };
+  }
 
   // Batch resolve all tags in a single query instead of N queries
   const resolvedTagsList = await resolveTagsBatch(
     ctx,
     result.items.map((item) => item.skill.tags),
+    result.items.map((item) => item.latestVersion),
   );
 
   const items = result.items.map((item, idx) => ({
@@ -543,6 +657,40 @@ export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request)
   const second = segments[1];
   const third = segments[2];
 
+  if (segments[0] === "-" && segments[1] === "reports" && segments.length === 2) {
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    const url = new URL(request.url);
+    const status = (url.searchParams.get("status")?.trim() || "open") as SkillReportListStatus;
+    if (!["open", "confirmed", "dismissed", "all"].includes(status)) {
+      return text("Invalid skill report status", 400, rate.headers);
+    }
+    const result = await runQueryRef(ctx, internalRefs.skills.listSkillReportsInternal, {
+      actorUserId: auth.userId,
+      status,
+      cursor: url.searchParams.get("cursor")?.trim() || null,
+      limit: toOptionalNumber(url.searchParams.get("limit")),
+    });
+    return json(result, 200, rate.headers);
+  }
+
+  if (segments[0] === "-" && segments[1] === "appeals" && segments.length === 2) {
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    const url = new URL(request.url);
+    const status = (url.searchParams.get("status")?.trim() || "open") as SkillAppealListStatus;
+    if (!["open", "accepted", "rejected", "all"].includes(status)) {
+      return text("Invalid skill appeal status", 400, rate.headers);
+    }
+    const result = await runQueryRef(ctx, internalRefs.skills.listSkillAppealsInternal, {
+      actorUserId: auth.userId,
+      status,
+      cursor: url.searchParams.get("cursor")?.trim() || null,
+      limit: toOptionalNumber(url.searchParams.get("limit")),
+    });
+    return json(result, 200, rate.headers);
+  }
+
   if (segments.length === 1) {
     const result = (await ctx.runQuery(api.skills.getBySlug, { slug })) as GetBySlugResult;
     if (!result?.skill) {
@@ -551,7 +699,7 @@ export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request)
       return text("Skill not found", 404, rate.headers);
     }
 
-    const [tags] = await resolveTagsBatch(ctx, [result.skill.tags]);
+    const [tags] = await resolveTagsBatch(ctx, [result.skill.tags], [result.latestVersion]);
     return json(
       {
         skill: {
@@ -675,7 +823,7 @@ export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request)
               summary: mod.summary,
               engineVersion: mod.engineVersion,
               updatedAt: mod.updatedAt,
-              evidence: sanitizeEvidence(mod.evidence, Boolean(isOwner || isStaff)),
+              evidence: sanitizeEvidence(mod.evidence, isOwner || isStaff),
               legacyReason: isOwner || isStaff ? mod.reason : null,
             }
           : null,
@@ -873,12 +1021,8 @@ export async function publishSkillV1Handler(ctx: ActionCtx, request: Request) {
   const rate = await applyRateLimit(ctx, request, "write");
   if (!rate.ok) return rate.response;
 
-  try {
-    if (!parseBearerToken(request)) return text("Unauthorized", 401, rate.headers);
-  } catch {
-    return text("Unauthorized", 401, rate.headers);
-  }
-  const { userId } = await requireApiTokenUser(ctx, request);
+  const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+  if (!auth.ok) return auth.response;
 
   const contentType = request.headers.get("content-type") ?? "";
   try {
@@ -888,7 +1032,7 @@ export async function publishSkillV1Handler(ctx: ActionCtx, request: Request) {
       if (!hasAcceptedLegacyLicenseTerms(payload.acceptLicenseTerms)) {
         return text("MIT-0 license terms must be accepted to publish skills", 400, rate.headers);
       }
-      const result = await publishVersionForUser(ctx, userId, payload);
+      const result = await publishSkillPayloadForApiUser(ctx, auth.userId, payload);
       return json({ ok: true, ...result }, 200, rate.headers);
     }
 
@@ -897,7 +1041,7 @@ export async function publishSkillV1Handler(ctx: ActionCtx, request: Request) {
       if (!hasAcceptedLegacyLicenseTerms(payload.acceptLicenseTerms)) {
         return text("MIT-0 license terms must be accepted to publish skills", 400, rate.headers);
       }
-      const result = await publishVersionForUser(ctx, userId, payload);
+      const result = await publishSkillPayloadForApiUser(ctx, auth.userId, payload);
       return json({ ok: true, ...result }, 200, rate.headers);
     }
   } catch (error) {
@@ -908,17 +1052,48 @@ export async function publishSkillV1Handler(ctx: ActionCtx, request: Request) {
   return text("Unsupported content type", 415, rate.headers);
 }
 
+async function publishSkillPayloadForApiUser(
+  ctx: ActionCtx,
+  userId: Id<"users">,
+  payload: ReturnType<typeof parsePublishBody>,
+) {
+  const { ownerHandle, migrateOwner, ...publishPayload } = payload;
+  if (!ownerHandle) {
+    return await publishVersionForUser(ctx, userId, publishPayload);
+  }
+  const target = (await ctx.runMutation(internal.publishers.resolvePublishTargetForUserInternal, {
+    actorUserId: userId,
+    ownerHandle,
+    minimumRole: "publisher",
+  })) as { publisherId: Id<"publishers"> };
+  return await publishVersionForUser(ctx, userId, publishPayload, {
+    ownerPublisherId: target.publisherId,
+    migrateOwner: migrateOwner === true ? true : undefined,
+  });
+}
+
 function hasAcceptedLegacyLicenseTerms(acceptLicenseTerms: boolean | undefined) {
-  return acceptLicenseTerms !== false;
+  return acceptLicenseTerms === true;
 }
 
 type TransferDecisionAction = "accept" | "reject" | "cancel";
 
+function isTransferDecisionFailure(result: unknown): result is { ok: false; error: string } {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { ok?: unknown }).ok === false &&
+    typeof (result as { error?: unknown }).error === "string"
+  );
+}
+
 function transferErrorToResponse(error: unknown, headers: HeadersInit) {
   const message = error instanceof Error ? error.message : "Transfer failed";
   const lower = message.toLowerCase();
-  if (lower.includes("unauthorized")) return text("Unauthorized", 401, headers);
-  if (lower.includes("forbidden")) return text("Forbidden", 403, headers);
+  if (lower.includes("unauthorized"))
+    return text(formatAuthzMessage(error, "Unauthorized"), 401, headers);
+  if (lower.includes("forbidden"))
+    return text(formatAuthzMessage(error, "Forbidden"), 403, headers);
   if (lower.includes("not found")) return text(message, 404, headers);
   if (lower.includes("required") || lower.includes("invalid") || lower.includes("pending")) {
     return text(message, 400, headers);
@@ -929,8 +1104,10 @@ function transferErrorToResponse(error: unknown, headers: HeadersInit) {
 function ownershipErrorToResponse(error: unknown, headers: HeadersInit) {
   const message = error instanceof Error ? error.message : "Skill update failed";
   const lower = message.toLowerCase();
-  if (lower.includes("unauthorized")) return text("Unauthorized", 401, headers);
-  if (lower.includes("forbidden")) return text("Forbidden", 403, headers);
+  if (lower.includes("unauthorized"))
+    return text(formatAuthzMessage(error, "Unauthorized"), 401, headers);
+  if (lower.includes("forbidden"))
+    return text(formatAuthzMessage(error, "Forbidden"), 403, headers);
   if (lower.includes("not found")) return text(message, 404, headers);
   return text(message, 400, headers);
 }
@@ -967,14 +1144,36 @@ async function handleTransferRequest(
 
   const toUserHandleRaw =
     typeof parsed.payload.toUserHandle === "string" ? parsed.payload.toUserHandle.trim() : "";
-  if (!toUserHandleRaw) return text("toUserHandle required", 400, headers);
+  const toOwnerRaw =
+    typeof parsed.payload.toOwner === "string"
+      ? parsed.payload.toOwner.trim()
+      : typeof parsed.payload.toPublisherHandle === "string"
+        ? parsed.payload.toPublisherHandle.trim()
+        : "";
+  const toHandleRaw = toOwnerRaw || toUserHandleRaw;
+  if (!toHandleRaw) return text("toUserHandle required", 400, headers);
   const message = typeof parsed.payload.message === "string" ? parsed.payload.message : undefined;
 
   try {
+    const publisher = (await ctx.runQuery(internal.publishers.getByHandleInternal, {
+      handle: toHandleRaw,
+    })) as { kind?: "user" | "org"; handle?: string; linkedUserId?: Id<"users"> } | null;
+    const isActorPersonalPublisher =
+      publisher?.kind === "user" && publisher.linkedUserId === transferContext.userId;
+    if (toOwnerRaw || publisher?.kind === "org" || isActorPersonalPublisher) {
+      const result = await ctx.runMutation(internal.skills.transferSkillOwnerForUserInternal, {
+        actorUserId: transferContext.userId,
+        slug: transferContext.skill.slug,
+        toOwner: toHandleRaw,
+        ...(message ? { reason: message } : {}),
+      });
+      return json(result, 200, headers);
+    }
+
     const result = await ctx.runMutation(internal.skillTransfers.requestTransferInternal, {
       actorUserId: transferContext.userId,
       skillId: transferContext.skill._id,
-      toUserHandle: toUserHandleRaw,
+      toUserHandle: toHandleRaw,
       message,
     });
     return json(result, 200, headers);
@@ -1017,6 +1216,9 @@ async function handleTransferDecision(
       actorUserId: transferContext.userId,
       transferId: pendingTransfer._id,
     });
+    if (isTransferDecisionFailure(result)) {
+      return transferErrorToResponse(new Error(result.error), headers);
+    }
     return json(result, 200, headers);
   } catch (error) {
     return transferErrorToResponse(error, headers);
@@ -1104,15 +1306,156 @@ export async function skillsPostRouterV1Handler(ctx: ActionCtx, request: Request
   const action = segments[1] ?? "";
   const slug = segments[0]?.trim().toLowerCase() ?? "";
 
+  if (
+    segments[0] === "-" &&
+    segments[1] === "reports" &&
+    segments[2] &&
+    segments[3] === "triage" &&
+    segments.length === 4
+  ) {
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    try {
+      const body = parseArk(
+        SkillReportTriageRequestSchema,
+        await request.json(),
+        "Skill report triage payload",
+      ) as {
+        status: "open" | "confirmed" | "dismissed";
+        note?: string;
+        finalAction?: "none" | "hide";
+      };
+      const result = await runMutationRef(
+        ctx,
+        internalRefs.skills.triageSkillReportForUserInternal,
+        {
+          actorUserId: auth.userId,
+          reportId: segments[2] as Id<"skillReports">,
+          status: body.status,
+          ...(body.note ? { note: body.note } : {}),
+          ...(body.finalAction ? { finalAction: body.finalAction } : {}),
+        },
+      );
+      return json(result, 200, rate.headers);
+    } catch (error) {
+      return text(
+        error instanceof Error ? error.message : "Skill report triage failed",
+        400,
+        rate.headers,
+      );
+    }
+  }
+
+  if (
+    segments[0] === "-" &&
+    segments[1] === "appeals" &&
+    segments[2] &&
+    segments[3] === "resolve" &&
+    segments.length === 4
+  ) {
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    try {
+      const body = parseArk(
+        SkillAppealResolveRequestSchema,
+        await request.json(),
+        "Skill appeal resolve payload",
+      ) as {
+        status: "open" | "accepted" | "rejected";
+        note?: string;
+        finalAction?: "none" | "restore";
+      };
+      const result = await runMutationRef(
+        ctx,
+        internalRefs.skills.resolveSkillAppealForUserInternal,
+        {
+          actorUserId: auth.userId,
+          appealId: segments[2] as Id<"skillAppeals">,
+          status: body.status,
+          ...(body.note ? { note: body.note } : {}),
+          ...(body.finalAction ? { finalAction: body.finalAction } : {}),
+        },
+      );
+      return json(result, 200, rate.headers);
+    } catch (error) {
+      return text(
+        error instanceof Error ? error.message : "Skill appeal resolve failed",
+        400,
+        rate.headers,
+      );
+    }
+  }
+
+  if (segments.length === 2 && action === "report") {
+    if (!slug) return text("Slug required", 400, rate.headers);
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    const parsed = await parseJsonPayload(request, rate.headers);
+    if (!parsed.ok) return parsed.response;
+    const reason = typeof parsed.payload.reason === "string" ? parsed.payload.reason : "";
+    const version = typeof parsed.payload.version === "string" ? parsed.payload.version : undefined;
+    try {
+      const result = await runMutationRef(ctx, internalRefs.skills.reportSkillForUserInternal, {
+        actorUserId: auth.userId,
+        slug,
+        reason,
+        ...(version ? { version } : {}),
+      });
+      return json(result, 200, rate.headers);
+    } catch (error) {
+      return text(
+        error instanceof Error ? error.message : "Skill report failed",
+        400,
+        rate.headers,
+      );
+    }
+  }
+
+  if (segments.length === 2 && action === "appeal") {
+    if (!slug) return text("Slug required", 400, rate.headers);
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+    try {
+      const body = parseArk(
+        SkillAppealRequestSchema,
+        await request.json(),
+        "Skill appeal payload",
+      ) as {
+        version?: string;
+        message: string;
+      };
+      const result = await runMutationRef(
+        ctx,
+        internalRefs.skills.submitSkillAppealForUserInternal,
+        {
+          actorUserId: auth.userId,
+          slug,
+          ...(body.version ? { version: body.version } : {}),
+          message: body.message,
+        },
+      );
+      return json(result, 200, rate.headers);
+    } catch (error) {
+      return text(
+        error instanceof Error ? error.message : "Skill appeal failed",
+        400,
+        rate.headers,
+      );
+    }
+  }
+
   if (segments.length === 2 && action === "undelete") {
     try {
       const { userId } = await requireApiTokenUser(ctx, request);
-      await ctx.runMutation(internal.skills.setSkillSoftDeletedInternal, {
+      const body = await readOptionalJson(request);
+      const reason = optionalStringField(body, "reason");
+      const result = await ctx.runMutation(internal.skills.setSkillSoftDeletedInternal, {
         userId,
         slug,
         deleted: false,
+        reason,
       });
-      return json({ ok: true }, 200, rate.headers);
+      return json(result, 200, rate.headers);
     } catch (error) {
       return softDeleteErrorToResponse("skill", error, rate.headers);
     }
@@ -1144,13 +1487,28 @@ export async function skillsDeleteRouterV1Handler(ctx: ActionCtx, request: Reque
   const slug = segments[0]?.trim().toLowerCase() ?? "";
   try {
     const { userId } = await requireApiTokenUser(ctx, request);
-    await ctx.runMutation(internal.skills.setSkillSoftDeletedInternal, {
+    const body = await readOptionalJson(request);
+    const reason = optionalStringField(body, "reason");
+    const result = await ctx.runMutation(internal.skills.setSkillSoftDeletedInternal, {
       userId,
       slug,
       deleted: true,
+      reason,
     });
-    return json({ ok: true }, 200, rate.headers);
+    return json(result, 200, rate.headers);
   } catch (error) {
     return softDeleteErrorToResponse("skill", error, rate.headers);
   }
+}
+
+async function readOptionalJson(request: Request): Promise<unknown> {
+  const raw = await request.text();
+  if (!raw.trim()) return undefined;
+  return JSON.parse(raw) as unknown;
+}
+
+function optionalStringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" ? field : undefined;
 }

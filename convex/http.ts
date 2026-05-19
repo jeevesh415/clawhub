@@ -4,6 +4,8 @@ import { auth } from "./auth";
 import { downloadZip } from "./downloads";
 import {
   cliPublishHttp,
+  cliDeviceCodeHttp,
+  cliDeviceTokenHttp,
   cliSkillDeleteHttp,
   cliSkillUndeleteHttp,
   cliTelemetrySyncHttp,
@@ -21,6 +23,7 @@ import {
   listSkillsV1Http,
   listSoulsV1Http,
   mintPublishTokenV1Http,
+  npmMirrorGetHttp,
   packagesDeleteRouterV1Http,
   packagesGetRouterV1Http,
   packagesPostRouterV1Http,
@@ -41,6 +44,7 @@ import {
   transfersGetRouterV1Http,
   usersListV1Http,
   usersPostRouterV1Http,
+  verifyDocsSessionV1Http,
   whoamiV1Http,
 } from "./httpApiV1";
 import { preflightHandler } from "./httpPreflight";
@@ -107,6 +111,12 @@ http.route({
   pathPrefix: `${ApiRoutes.packages}/`,
   method: "GET",
   handler: packagesGetRouterV1Http,
+});
+
+http.route({
+  pathPrefix: "/api/npm/",
+  method: "GET",
+  handler: npmMirrorGetHttp,
 });
 
 http.route({
@@ -179,6 +189,24 @@ http.route({
   path: ApiRoutes.whoami,
   method: "GET",
   handler: whoamiV1Http,
+});
+
+http.route({
+  path: "/api/cli/device/code",
+  method: "POST",
+  handler: cliDeviceCodeHttp,
+});
+
+http.route({
+  path: "/api/cli/device/token",
+  method: "POST",
+  handler: cliDeviceTokenHttp,
+});
+
+http.route({
+  path: "/api/v1/docs/session/verify",
+  method: "GET",
+  handler: verifyDocsSessionV1Http,
 });
 
 http.route({

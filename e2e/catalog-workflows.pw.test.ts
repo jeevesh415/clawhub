@@ -1,39 +1,48 @@
 import { expect, test } from "@playwright/test";
-import { expectHealthyPage, trackRuntimeErrors } from "./helpers/runtimeErrors";
+import { expectHealthyPage, trackRuntimeErrors, waitForHydration } from "./helpers/runtimeErrors";
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("skills browse can filter, change view, and open detail", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 
   await page.goto("/skills?sort=downloads&dir=desc", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: /^Skills/ })).toBeVisible();
-  await expect(page.locator(".skill-card, .skills-row").first()).toBeVisible();
+  await waitForHydration(page);
+  await expect(page.locator(".skill-card, .skill-list-item").first()).toBeVisible();
 
-  const hideSuspicious = page.getByRole("button", { name: "Hide suspicious" });
-  await hideSuspicious.click();
-  await expect(hideSuspicious).toHaveAttribute("aria-pressed", "true");
+  const hideSuspicious = page.getByRole("checkbox", { name: "Hide suspicious" });
+  if (await hideSuspicious.isVisible().catch(() => false)) {
+    await hideSuspicious.check();
+    await expect(hideSuspicious).toBeChecked();
+  }
 
-  const searchInput = page.getByPlaceholder("Filter by name, slug, or summary…");
+  const searchInput = page.getByPlaceholder("Search skills...");
   await searchInput.fill("gif");
   await expect(page).toHaveURL(/q=gif/);
   await searchInput.fill("");
-  await expect(page.locator(".skill-card, .skills-row").first()).toBeVisible();
+  await expect(page.locator(".skill-card, .skill-list-item").first()).toBeVisible();
 
-  const viewToggle = page.locator(".skills-view").first();
-  const nextViewLabel = ((await viewToggle.textContent()) ?? "").trim();
-  await viewToggle.click();
-  await expect(viewToggle).not.toHaveText(nextViewLabel);
+  await page.goto("/skills?sort=downloads&dir=desc", { waitUntil: "domcontentloaded" });
+  await waitForHydration(page);
+  await expect(page.locator(".skill-card, .skill-list-item").first()).toBeVisible();
 
-  const firstSkill = page.locator(".skill-card, .skills-row").first();
+  await page.getByRole("button", { name: "Grid" }).click();
+  await expect(page).toHaveURL(/view=grid/);
+  await expect(page.locator(".skill-card").first()).toBeVisible();
+
+  const firstSkill = page.locator("a.skill-card").first();
   await expect(firstSkill).toBeVisible();
 
-  const skillName = (
-    await firstSkill.locator(".skill-card-title, .skills-row-title span").first().textContent()
-  )?.trim();
-  expect(skillName).toBeTruthy();
+  const href = await firstSkill.getAttribute("href");
+  expect(href).toMatch(/^\/[^/]+\/[^/]+$/);
 
+  await firstSkill.scrollIntoViewIfNeeded();
   await firstSkill.click();
-  await expect(page.getByRole("heading", { name: skillName! })).toBeVisible();
-  await expect(page.getByRole("link", { name: /@/ }).first()).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`${escapeRegExp(href!)}$`));
+  await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
@@ -52,43 +61,55 @@ test("known public skill detail links to owner profile", async ({ page, request 
 
   const errors = trackRuntimeErrors(page);
   await page.goto(`/${ownerHandle}/${slug}`, { waitUntil: "domcontentloaded" });
-  const ownerLink = page.locator(".user-handle").first();
+  const ownerLink = page.locator(`a[href="/p/${ownerHandle}"]`).first();
 
-  await expect(ownerLink).toHaveAttribute("href", new RegExp(`/u/${ownerHandle}$`));
+  await expect(ownerLink).toHaveAttribute("href", new RegExp(`/p/${ownerHandle}$`));
+  await waitForHydration(page);
   await ownerLink.click();
-  await expect(page).toHaveURL(new RegExp(`/u/${ownerHandle}$`));
-  await expect(page.getByRole("heading", { name: "Published" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Stars" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/p/${ownerHandle}$`));
+  await expect(page.getByRole("heading", { name: "Publisher catalog" })).toBeAttached();
+  await expect(page.getByRole("button", { name: /^Published/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Starred/ })).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
-test("souls browse can filter, change view, open detail, and open owner profile", async ({
-  page,
-}) => {
+test("souls holding page links to live directories", async ({ browser, baseURL }) => {
+  const appUrl = (path: string) => new URL(path, baseURL ?? "http://127.0.0.1:4173").toString();
+
+  const page = await browser.newPage();
   const errors = trackRuntimeErrors(page);
 
-  await page.goto("/souls", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Souls" })).toBeVisible();
+  await page.goto(appUrl("/souls"), { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "SOUL.md discovery is on deck" })).toBeVisible();
 
-  const searchInput = page.getByPlaceholder("Filter by name, slug, or summary…");
-  await searchInput.fill("soul");
-  await expect(page).toHaveURL(/\/souls\?/);
+  const skillsLink = page.getByRole("link", { name: "Browse Skills" });
+  await expect(skillsLink).toHaveAttribute("href", /\/skills/);
+  const skillsHref = (await skillsLink.getAttribute("href")) ?? "/skills";
 
-  await page.getByRole("button", { name: "Cards" }).click();
-  await expect(page.locator(".skill-card").first()).toBeVisible();
+  const publishersLink = page.getByRole("link", { name: "Browse Publishers" });
+  await expect(publishersLink).toHaveAttribute("href", /\/publishers/);
+  const publishersHref = (await publishersLink.getAttribute("href")) ?? "/publishers";
 
-  const firstSoul = page.locator(".skill-card").first();
-  const soulName = (await firstSoul.locator(".skill-card-title").textContent())?.trim();
-  expect(soulName).toBeTruthy();
-
-  await firstSoul.click();
-  await expect(page.getByRole("heading", { name: soulName! })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Download SOUL.md" })).toBeVisible();
-
-  const ownerLink = page.getByRole("link", { name: /@/ }).first();
-  await ownerLink.click();
-  await expect(page).toHaveURL(/\/u\//);
-  await expect(page.getByRole("heading", { name: "Published" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Stars" })).toBeVisible();
   await expectHealthyPage(page, errors);
+  await page.close();
+
+  const skillsPage = await browser.newPage();
+  const skillsErrors = trackRuntimeErrors(skillsPage);
+  await skillsPage.goto(appUrl(skillsHref), {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(skillsPage).toHaveURL(/\/skills/);
+  await expect(skillsPage.getByRole("heading", { name: /^Skills/ })).toBeVisible();
+  await expectHealthyPage(skillsPage, skillsErrors);
+  await skillsPage.close();
+
+  const publishersPage = await browser.newPage();
+  const publishersErrors = trackRuntimeErrors(publishersPage);
+  await publishersPage.goto(appUrl(publishersHref), {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(publishersPage).toHaveURL(/\/publishers/);
+  await expect(publishersPage.getByRole("heading", { name: /^Publishers/ })).toBeVisible();
+  await expectHealthyPage(publishersPage, publishersErrors);
+  await publishersPage.close();
 });

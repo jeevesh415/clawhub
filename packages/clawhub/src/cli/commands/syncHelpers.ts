@@ -177,16 +177,6 @@ export async function checkRegistrySyncState(
   };
 }
 
-export async function scanRoots(roots: string[]) {
-  const result = await scanRootsWithLabels(roots);
-  return {
-    roots: result.roots,
-    skillsByRoot: result.skillsByRoot,
-    skills: result.skills,
-    rootsWithSkills: result.rootsWithSkills,
-  };
-}
-
 export async function scanRootsWithLabels(roots: string[], labels?: Record<string, string>) {
   const all: SkillFolder[] = [];
   const rootsWithSkills: string[] = [];
@@ -282,7 +272,7 @@ export async function selectToUpload(
     required: false,
   });
   if (isCancel(picked)) fail("Canceled");
-  const selected = picked.map((key) => valueByKey.get(String(key))).filter(Boolean) as Candidate[];
+  const selected = picked.map((key) => valueByKey.get(key)).filter(Boolean) as Candidate[];
   return selected;
 }
 
@@ -379,10 +369,7 @@ export function dedupeSkillsBySlug(skills: SkillFolder[]) {
   return { skills: unique, duplicates };
 }
 
-export function formatActionableStatus(
-  candidate: Candidate,
-  bump: "patch" | "minor" | "major",
-): string {
+function formatActionableStatus(candidate: Candidate, bump: "patch" | "minor" | "major"): string {
   if (candidate.status === "new") return "NEW";
   const latest = candidate.latestVersion;
   const next = latest ? semver.inc(latest, bump) : null;

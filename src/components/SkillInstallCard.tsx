@@ -1,26 +1,54 @@
 import type { ClawdisSkillMetadata } from "clawhub-schema";
-import {
-  PLATFORM_SKILL_LICENSE,
-  PLATFORM_SKILL_LICENSE_SUMMARY,
-  PLATFORM_SKILL_LICENSE_URL,
-} from "clawhub-schema/licenseConstants";
+import type { ReactNode } from "react";
 import { formatInstallCommand, formatInstallLabel } from "./skillDetailUtils";
-import { Badge } from "./ui/badge";
-import { Card, CardContent } from "./ui/card";
 
 type SkillInstallCardProps = {
   clawdis: ClawdisSkillMetadata | undefined;
   osLabels: string[];
 };
 
-export function SkillInstallCard({ clawdis, osLabels }: SkillInstallCardProps) {
+export type SkillInstallTabId = "runtime" | "dependencies" | "install" | "links";
+
+type SkillInstallTab = {
+  id: SkillInstallTabId;
+  label: string;
+  panel: ReactNode;
+};
+
+function SkillInstallMetadataPanel({ children }: { children: ReactNode }) {
+  return <div className="skill-admin-panel skill-install-metadata-panel">{children}</div>;
+}
+
+function SkillInstallMetadataRow({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="skill-admin-row skill-install-metadata-row">
+      <div className="skill-admin-row-copy">
+        <h3>{title}</h3>
+        {typeof description === "string" ? <p>{description}</p> : description}
+      </div>
+      {children ? <div className="skill-install-metadata-value">{children}</div> : null}
+    </div>
+  );
+}
+
+export function buildSkillInstallTabs({
+  clawdis,
+  osLabels,
+}: SkillInstallCardProps): SkillInstallTab[] {
   const requirements = clawdis?.requires;
   const installSpecs = clawdis?.install ?? [];
   const envVars = clawdis?.envVars ?? [];
   const dependencies = clawdis?.dependencies ?? [];
   const links = clawdis?.links;
   const hasRuntimeRequirements = Boolean(
-    clawdis?.emoji ||
     osLabels.length ||
     requirements?.bins?.length ||
     requirements?.anyBins?.length ||
@@ -32,231 +60,179 @@ export function SkillInstallCard({ clawdis, osLabels }: SkillInstallCardProps) {
   const hasInstallSpecs = installSpecs.length > 0;
   const hasDependencies = dependencies.length > 0;
   const hasLinks = Boolean(links?.homepage || links?.repository || links?.documentation);
-  const hasLicense = true;
 
-  if (!hasRuntimeRequirements && !hasInstallSpecs && !hasDependencies && !hasLinks && !hasLicense) {
-    return null;
+  if (!hasRuntimeRequirements && !hasInstallSpecs && !hasDependencies && !hasLinks) {
+    return [];
   }
 
-  return (
-    <div className="border-t border-[color:var(--line)] pt-4">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Card className="p-4">
-          <CardContent className="gap-2">
-            <h3 className="m-0 font-display text-base font-bold text-[color:var(--ink)]">
-              License
-            </h3>
-            <div className="flex flex-col gap-2">
-              <Badge variant="accent">{PLATFORM_SKILL_LICENSE}</Badge>
-              <div className="text-sm text-[color:var(--ink-soft)]">
-                <span>{PLATFORM_SKILL_LICENSE_SUMMARY}</span>
-              </div>
-              <div className="text-sm text-[color:var(--ink-soft)]">
-                <strong>Terms</strong>
+  const tabs: SkillInstallTab[] = [];
+
+  if (hasRuntimeRequirements) {
+    tabs.push({
+      id: "runtime",
+      label: "Runtime",
+      panel: (
+        <div className="skill-install-tab-panel runtime-requirements-panel">
+          <SkillInstallMetadataPanel>
+            {osLabels.length ? (
+              <SkillInstallMetadataRow title="OS" description={osLabels.join(" · ")} />
+            ) : null}
+            {requirements?.bins?.length ? (
+              <SkillInstallMetadataRow title="Bins" description={requirements.bins.join(", ")} />
+            ) : null}
+            {requirements?.anyBins?.length ? (
+              <SkillInstallMetadataRow
+                title="Any bin"
+                description={requirements.anyBins.join(", ")}
+              />
+            ) : null}
+            {requirements?.env?.length ? (
+              <SkillInstallMetadataRow title="Env" description={requirements.env.join(", ")} />
+            ) : null}
+            {requirements?.config?.length ? (
+              <SkillInstallMetadataRow
+                title="Config"
+                description={requirements.config.join(", ")}
+              />
+            ) : null}
+            {clawdis?.primaryEnv ? (
+              <SkillInstallMetadataRow title="Primary env" description={clawdis.primaryEnv} />
+            ) : null}
+            {envVars.length > 0 ? (
+              <SkillInstallMetadataRow title="Environment variables">
+                <div className="skill-install-env-list">
+                  {envVars.map((env, index) => (
+                    <div key={`${env.name}-${index}`} className="skill-install-env-row">
+                      <code>{env.name}</code>
+                      {env.required === false ? (
+                        <span>optional</span>
+                      ) : env.required === true ? (
+                        <span>required</span>
+                      ) : null}
+                      {env.description ? <p>{env.description}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              </SkillInstallMetadataRow>
+            ) : null}
+          </SkillInstallMetadataPanel>
+        </div>
+      ),
+    });
+  }
+
+  if (hasDependencies) {
+    tabs.push({
+      id: "dependencies",
+      label: "Dependencies",
+      panel: (
+        <div className="skill-install-tab-panel">
+          <SkillInstallMetadataPanel>
+            {dependencies.map((dep, index) => (
+              <SkillInstallMetadataRow
+                key={`${dep.name}-${index}`}
+                title={dep.name}
+                description={
+                  dep.url ? (
+                    <a href={dep.url} target="_blank" rel="noopener noreferrer">
+                      {dep.url}
+                    </a>
+                  ) : dep.repository ? (
+                    <a href={dep.repository} target="_blank" rel="noopener noreferrer">
+                      {dep.repository}
+                    </a>
+                  ) : null
+                }
+              >
+                <span>
+                  {dep.type}
+                  {dep.version ? ` ${dep.version}` : ""}
+                </span>
+                {dep.repository && dep.repository !== dep.url ? (
+                  <a href={dep.repository} target="_blank" rel="noopener noreferrer">
+                    Source
+                  </a>
+                ) : null}
+              </SkillInstallMetadataRow>
+            ))}
+          </SkillInstallMetadataPanel>
+        </div>
+      ),
+    });
+  }
+
+  if (hasInstallSpecs) {
+    tabs.push({
+      id: "install",
+      label: "Install",
+      panel: (
+        <div className="skill-install-tab-panel">
+          <SkillInstallMetadataPanel>
+            {installSpecs.map((spec, index) => {
+              const command = formatInstallCommand(spec);
+              return (
+                <SkillInstallMetadataRow
+                  key={`${spec.id ?? spec.kind}-${index}`}
+                  title={spec.label ?? formatInstallLabel(spec)}
+                  description={spec.bins?.length ? `Bins: ${spec.bins.join(", ")}` : undefined}
+                >
+                  {command ? (
+                    <pre className="hero-install-code skill-install-command">
+                      <code>{command}</code>
+                    </pre>
+                  ) : null}
+                </SkillInstallMetadataRow>
+              );
+            })}
+          </SkillInstallMetadataPanel>
+        </div>
+      ),
+    });
+  }
+
+  if (hasLinks) {
+    tabs.push({
+      id: "links",
+      label: "Links",
+      panel: (
+        <div className="skill-install-tab-panel">
+          <SkillInstallMetadataPanel>
+            {links?.homepage ? (
+              <SkillInstallMetadataRow title="Homepage">
                 <a
-                  href={PLATFORM_SKILL_LICENSE_URL}
+                  href={links.homepage}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="ml-1"
+                  className="break-all"
                 >
-                  {PLATFORM_SKILL_LICENSE_URL}
+                  {links.homepage}
                 </a>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        {hasRuntimeRequirements ? (
-          <Card className="p-4">
-            <CardContent className="gap-2">
-              <h3 className="m-0 font-display text-base font-bold text-[color:var(--ink)]">
-                Runtime requirements
-              </h3>
-              <div className="flex flex-col gap-2">
-                {clawdis?.emoji ? <Badge>{clawdis.emoji} Clawdis</Badge> : null}
-                {osLabels.length ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>OS</strong>
-                    <span className="ml-1">{osLabels.join(" · ")}</span>
-                  </div>
-                ) : null}
-                {requirements?.bins?.length ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Bins</strong>
-                    <span className="ml-1">{requirements.bins.join(", ")}</span>
-                  </div>
-                ) : null}
-                {requirements?.anyBins?.length ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Any bin</strong>
-                    <span className="ml-1">{requirements.anyBins.join(", ")}</span>
-                  </div>
-                ) : null}
-                {requirements?.env?.length ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Env</strong>
-                    <span className="ml-1">{requirements.env.join(", ")}</span>
-                  </div>
-                ) : null}
-                {requirements?.config?.length ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Config</strong>
-                    <span className="ml-1">{requirements.config.join(", ")}</span>
-                  </div>
-                ) : null}
-                {clawdis?.primaryEnv ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Primary env</strong>
-                    <span className="ml-1">{clawdis.primaryEnv}</span>
-                  </div>
-                ) : null}
-                {envVars.length > 0 ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Environment variables</strong>
-                    <div className="mt-1 flex flex-col gap-1">
-                      {envVars.map((env, index) => (
-                        <div key={`${env.name}-${index}`} className="flex items-baseline gap-2">
-                          <code className="text-[0.85rem]">{env.name}</code>
-                          {env.required === false ? (
-                            <span className="text-xs text-[color:var(--ink-soft)]">optional</span>
-                          ) : env.required === true ? (
-                            <span className="text-xs text-[color:var(--accent)]">required</span>
-                          ) : null}
-                          {env.description ? (
-                            <span className="text-[0.8rem] text-[color:var(--ink-soft)]">
-                              — {env.description}
-                            </span>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-        {hasDependencies ? (
-          <Card className="p-4">
-            <CardContent className="gap-2">
-              <h3 className="m-0 font-display text-base font-bold text-[color:var(--ink)]">
-                Dependencies
-              </h3>
-              <div className="flex flex-col gap-2">
-                {dependencies.map((dep, index) => (
-                  <div
-                    key={`${dep.name}-${index}`}
-                    className="text-sm text-[color:var(--ink-soft)]"
-                  >
-                    <div>
-                      <strong>{dep.name}</strong>
-                      <span className="ml-2 text-[0.85rem] text-[color:var(--ink-soft)]">
-                        {dep.type}
-                        {dep.version ? ` ${dep.version}` : ""}
-                      </span>
-                      {dep.url ? (
-                        <div className="break-all text-[0.8rem]">
-                          <a href={dep.url} target="_blank" rel="noopener noreferrer">
-                            {dep.url}
-                          </a>
-                        </div>
-                      ) : null}
-                      {dep.repository && dep.repository !== dep.url ? (
-                        <div className="text-[0.8rem]">
-                          <a href={dep.repository} target="_blank" rel="noopener noreferrer">
-                            Source
-                          </a>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-        {hasInstallSpecs ? (
-          <Card className="p-4">
-            <CardContent className="gap-2">
-              <h3 className="m-0 font-display text-base font-bold text-[color:var(--ink)]">
-                Install
-              </h3>
-              <div className="flex flex-col gap-2">
-                {installSpecs.map((spec, index) => {
-                  const command = formatInstallCommand(spec);
-                  return (
-                    <div
-                      key={`${spec.id ?? spec.kind}-${index}`}
-                      className="text-sm text-[color:var(--ink-soft)]"
-                    >
-                      <div>
-                        <strong>{spec.label ?? formatInstallLabel(spec)}</strong>
-                        {spec.bins?.length ? (
-                          <div className="text-[0.85rem] text-[color:var(--ink-soft)]">
-                            Bins: {spec.bins.join(", ")}
-                          </div>
-                        ) : null}
-                        {command ? (
-                          <code className="mt-0.5 block font-mono text-xs">{command}</code>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-        {hasLinks ? (
-          <Card className="p-4">
-            <CardContent className="gap-2">
-              <h3 className="m-0 font-display text-base font-bold text-[color:var(--ink)]">
-                Links
-              </h3>
-              <div className="flex flex-col gap-2">
-                {links?.homepage ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Homepage</strong>
-                    <a
-                      href={links.homepage}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="ml-1 break-all"
-                    >
-                      {links.homepage}
-                    </a>
-                  </div>
-                ) : null}
-                {links?.repository ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Repository</strong>
-                    <a
-                      href={links.repository}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="ml-1 break-all"
-                    >
-                      {links.repository}
-                    </a>
-                  </div>
-                ) : null}
-                {links?.documentation ? (
-                  <div className="text-sm text-[color:var(--ink-soft)]">
-                    <strong>Docs</strong>
-                    <a
-                      href={links.documentation}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="ml-1"
-                    >
-                      {links.documentation}
-                    </a>
-                  </div>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
-      </div>
-    </div>
-  );
+              </SkillInstallMetadataRow>
+            ) : null}
+            {links?.repository ? (
+              <SkillInstallMetadataRow title="Repository">
+                <a
+                  href={links.repository}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="break-all"
+                >
+                  {links.repository}
+                </a>
+              </SkillInstallMetadataRow>
+            ) : null}
+            {links?.documentation ? (
+              <SkillInstallMetadataRow title="Docs">
+                <a href={links.documentation} target="_blank" rel="noopener noreferrer">
+                  {links.documentation}
+                </a>
+              </SkillInstallMetadataRow>
+            ) : null}
+          </SkillInstallMetadataPanel>
+        </div>
+      ),
+    });
+  }
+
+  return tabs;
 }

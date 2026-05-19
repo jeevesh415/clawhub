@@ -30,9 +30,9 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "arktype": "^2.2.0"
+    "arktype": "2.2.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "6.0.3"
   }
 }

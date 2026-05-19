@@ -33,6 +33,7 @@ const clearSkillManualOverrideHandler = (
 const updateVersionLlmAnalysisInternalHandler = (
   updateVersionLlmAnalysisInternal as unknown as WrappedHandler<{
     versionId: string;
+    moderationMode?: "normal" | "preserve";
     llmAnalysis: Record<string, unknown>;
   }>
 )._handler;
@@ -75,6 +76,12 @@ function makeCtx(params: { skill: Record<string, unknown>; version?: Record<stri
     get,
     query,
   };
+}
+
+function findPatchForId(patch: ReturnType<typeof vi.fn>, id: string) {
+  return (patch.mock.calls as Array<[string, Record<string, unknown>]>).find(
+    ([patchedId]) => patchedId === id,
+  )?.[1];
 }
 
 describe("skills manual overrides", () => {
@@ -202,7 +209,12 @@ describe("skills manual overrides", () => {
       _id: "skillVersions:3",
       skillId: "skills:1",
       staticScan: undefined,
-      vtAnalysis: { status: "suspicious", checkedAt: now - 1000 },
+      vtAnalysis: {
+        status: "suspicious",
+        source: "engines",
+        engineStats: { malicious: 0, suspicious: 1, undetected: 64 },
+        checkedAt: now - 1000,
+      },
       llmAnalysis: undefined,
     };
 
@@ -223,10 +235,10 @@ describe("skills manual overrides", () => {
     expect(patch).toHaveBeenCalledWith(
       "skills:1",
       expect.objectContaining({
-        moderationReason: "scanner.vt.suspicious",
-        moderationVerdict: "suspicious",
-        moderationFlags: ["flagged.suspicious"],
-        isSuspicious: true,
+        moderationReason: "scanner.aggregate.clean",
+        moderationVerdict: "clean",
+        moderationFlags: undefined,
+        isSuspicious: false,
       }),
     );
     expect(insert).toHaveBeenCalledWith(
@@ -266,7 +278,12 @@ describe("skills manual overrides", () => {
       _id: "skillVersions:4",
       skillId: "skills:1",
       staticScan: undefined,
-      vtAnalysis: { status: "malicious", checkedAt: now - 1000 },
+      vtAnalysis: {
+        status: "malicious",
+        source: "engines",
+        engineStats: { malicious: 1, suspicious: 0, undetected: 64 },
+        checkedAt: now - 1000,
+      },
       llmAnalysis: undefined,
     };
 
@@ -280,12 +297,12 @@ describe("skills manual overrides", () => {
     expect(patch).toHaveBeenCalledWith(
       "skills:1",
       expect.objectContaining({
-        moderationStatus: "hidden",
-        moderationReason: "scanner.vt.malicious",
-        moderationVerdict: "malicious",
-        moderationFlags: ["blocked.malware"],
-        hiddenAt: now,
-        lastReviewedAt: now,
+        moderationStatus: "active",
+        moderationReason: "scanner.aggregate.clean",
+        moderationVerdict: "clean",
+        moderationFlags: undefined,
+        hiddenAt: undefined,
+        lastReviewedAt: undefined,
         isSuspicious: false,
       }),
     );
@@ -386,6 +403,152 @@ describe("skills manual overrides", () => {
     });
   });
 
+  it("can store llm backfill results without syncing moderation", async () => {
+    const now = 1_700_000_250_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    const skill = {
+      _id: "skills:1",
+      ownerUserId: "users:owner",
+      latestVersionId: "skillVersions:7",
+      softDeletedAt: undefined,
+      moderationStatus: "active",
+      moderationReason: undefined,
+      moderationVerdict: undefined,
+      moderationFlags: undefined,
+    };
+    const version = {
+      _id: "skillVersions:7",
+      skillId: "skills:1",
+      staticScan: undefined,
+      vtAnalysis: undefined,
+      llmAnalysis: undefined,
+    };
+
+    const { ctx, patch, get, query } = makeCtx({ skill, version });
+
+    await updateVersionLlmAnalysisInternalHandler(ctx, {
+      versionId: "skillVersions:7",
+      moderationMode: "preserve",
+      llmAnalysis: {
+        status: "malicious",
+        verdict: "malicious",
+        checkedAt: now,
+      },
+    });
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("skillVersions:7", {
+      llmAnalysis: {
+        status: "malicious",
+        verdict: "malicious",
+        checkedAt: now,
+      },
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith("skillVersions:7");
+    expect(get).not.toHaveBeenCalledWith("skills:1");
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("does not bump public updatedAt when llm scan sync updates moderation", async () => {
+    const originalUpdatedAt = 1_700_000_100_000;
+    const now = 1_700_000_300_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    const skill = {
+      _id: "skills:1",
+      ownerUserId: "users:owner",
+      latestVersionId: "skillVersions:8",
+      softDeletedAt: undefined,
+      updatedAt: originalUpdatedAt,
+      moderationStatus: "active",
+      moderationReason: "scanner.vt.clean",
+      moderationVerdict: "clean",
+      moderationFlags: undefined,
+    };
+    const version = {
+      _id: "skillVersions:8",
+      skillId: "skills:1",
+      staticScan: undefined,
+      vtAnalysis: { status: "clean", checkedAt: now - 100 },
+      llmAnalysis: undefined,
+    };
+
+    const { ctx, patch } = makeCtx({ skill, version });
+
+    await updateVersionLlmAnalysisInternalHandler(ctx, {
+      versionId: "skillVersions:8",
+      llmAnalysis: {
+        status: "suspicious",
+        verdict: "suspicious",
+        checkedAt: now,
+      },
+    });
+
+    const skillPatch = findPatchForId(patch, "skills:1");
+    expect(skillPatch).toEqual(
+      expect.objectContaining({
+        moderationEvaluatedAt: now,
+        moderationSourceVersionId: "skillVersions:8",
+      }),
+    );
+    expect(skillPatch).not.toHaveProperty("updatedAt");
+  });
+
+  it("does not bump public updatedAt when llm scan sync preserves a manual override", async () => {
+    const originalUpdatedAt = 1_700_000_100_000;
+    const overrideUpdatedAt = 1_700_000_200_000;
+    const now = 1_700_000_300_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    const skill = {
+      _id: "skills:1",
+      ownerUserId: "users:owner",
+      latestVersionId: "skillVersions:8",
+      softDeletedAt: undefined,
+      updatedAt: originalUpdatedAt,
+      manualOverride: {
+        verdict: "clean",
+        note: "reviewed",
+        reviewerUserId: "users:moderator",
+        updatedAt: overrideUpdatedAt,
+      },
+      moderationStatus: "active",
+      moderationReason: "manual.override.clean",
+      moderationVerdict: "clean",
+      moderationFlags: undefined,
+    };
+    const version = {
+      _id: "skillVersions:8",
+      skillId: "skills:1",
+      staticScan: undefined,
+      vtAnalysis: { status: "clean", checkedAt: now - 100 },
+      llmAnalysis: undefined,
+    };
+
+    const { ctx, patch } = makeCtx({ skill, version });
+
+    await updateVersionLlmAnalysisInternalHandler(ctx, {
+      versionId: "skillVersions:8",
+      llmAnalysis: {
+        status: "suspicious",
+        verdict: "suspicious",
+        checkedAt: now,
+      },
+    });
+
+    const skillPatch = findPatchForId(patch, "skills:1");
+    expect(skillPatch).toEqual(
+      expect.objectContaining({
+        moderationReason: "manual.override.clean",
+        moderationEvaluatedAt: overrideUpdatedAt,
+        moderationSourceVersionId: "skillVersions:8",
+      }),
+    );
+    expect(skillPatch).not.toHaveProperty("updatedAt");
+  });
+
   it("updates global public count when llm scan sync restores a skill to active", async () => {
     const now = 1_700_000_300_000;
     vi.spyOn(Date, "now").mockReturnValue(now);
@@ -423,6 +586,68 @@ describe("skills manual overrides", () => {
       expect.objectContaining({
         activeSkillsCount: 2,
         updatedAt: now,
+      }),
+    );
+  });
+
+  it("clears legacy suspicious state when LLM corroborates clean VT telemetry", async () => {
+    const now = 1_700_000_400_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    const skill = {
+      _id: "skills:1",
+      ownerUserId: "users:owner",
+      latestVersionId: "skillVersions:9",
+      softDeletedAt: undefined,
+      moderationStatus: "hidden",
+      moderationReason: "scanner.vt.suspicious",
+      moderationVerdict: "suspicious",
+      moderationFlags: ["flagged.suspicious"],
+    };
+    const version = {
+      _id: "skillVersions:9",
+      skillId: "skills:1",
+      staticScan: {
+        status: "clean",
+        reasonCodes: [],
+        findings: [],
+        summary: "",
+        engineVersion: "v2.1.1",
+        checkedAt: now - 200,
+      },
+      vtAnalysis: {
+        status: "suspicious",
+        scanner: "legacy-ai",
+        engineStats: {
+          malicious: 0,
+          suspicious: 0,
+          harmless: 12,
+          undetected: 54,
+        },
+        checkedAt: now - 100,
+      },
+      llmAnalysis: undefined,
+    };
+
+    const { ctx, patch } = makeCtx({ skill, version });
+
+    await updateVersionLlmAnalysisInternalHandler(ctx, {
+      versionId: "skillVersions:9",
+      llmAnalysis: {
+        status: "clean",
+        checkedAt: now,
+      },
+    });
+
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        moderationStatus: "active",
+        moderationReason: "scanner.aggregate.clean",
+        moderationFlags: undefined,
+        moderationVerdict: "clean",
+        moderationReasonCodes: undefined,
+        isSuspicious: false,
       }),
     );
   });

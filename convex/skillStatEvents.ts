@@ -22,14 +22,15 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { internalAction, internalMutation, internalQuery } from "./functions";
+import { toDayKey } from "./lib/leaderboards";
 import { applySkillStatDeltas, bumpDailySkillStats } from "./lib/skillStats";
+import { adjustUserSkillStatsForSkillChange } from "./lib/userSkillStats";
 
 /**
  * Event types that affect skill stats:
  *
  * - download: User downloaded skill as zip (+1 downloads)
- * - star: User starred the skill (+1 stars)
- * - unstar: User removed their star (-1 stars)
+ * - star/unstar: legacy queued events; star rows now update counts synchronously
  * - install_new: First time this user installed this skill (+1 installsAllTime, +1 installsCurrent)
  * - install_reactivate: User re-added skill after removing it (+1 installsCurrent only)
  * - install_deactivate: User removed skill from all projects (-1 installsCurrent)
@@ -138,10 +139,11 @@ function aggregateEvents(events: Doc<"skillStatEvents">[]): AggregatedDeltas {
         result.downloadEvents.push(event.occurredAt);
         break;
       case "star":
-        result.stars += 1;
+        // Star counts are updated synchronously from `stars` mutations now.
+        // Historical queued star events are marked processed without changing stats.
         break;
       case "unstar":
-        result.stars -= 1;
+        // See `star` above.
         break;
       case "comment":
         result.comments += 1;
@@ -202,7 +204,7 @@ function aggregateEvents(events: Doc<"skillStatEvents">[]): AggregatedDeltas {
 export const processSkillStatEventsInternal = internalMutation({
   args: { batchSize: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const batchSize = args.batchSize ?? 500;
+    const batchSize = Math.max(1, Math.min(args.batchSize ?? 100, 100));
     const now = Date.now();
 
     // Level 1: Fetch a batch of unprocessed events
@@ -259,6 +261,7 @@ export const processSkillStatEventsInternal = internalMutation({
         // Don't update `updatedAt` — stat changes shouldn't move the
         // skill's position in the by_active_updated index.
         await ctx.db.patch(skill._id, patch);
+        await adjustUserSkillStatsForSkillChange(ctx, skill, { ...skill, ...patch });
       }
 
       // NOTE: Daily stats (skillDailyStats) are written by the 15-minute
@@ -357,15 +360,43 @@ export const applyAggregatedStatsAndUpdateCursor = internalMutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const dailyStats = new Map<
+      string,
+      { skillId: Id<"skills">; occurredAt: number; downloads: number; installs: number }
+    >();
 
-    // Update daily stats for trending/leaderboards
     for (const delta of args.skillDeltas) {
       for (const occurredAt of delta.downloadEvents) {
-        await bumpDailySkillStats(ctx, { skillId: delta.skillId, now: occurredAt, downloads: 1 });
+        const key = `${delta.skillId}:${toDayKey(occurredAt)}`;
+        const current = dailyStats.get(key) ?? {
+          skillId: delta.skillId,
+          occurredAt,
+          downloads: 0,
+          installs: 0,
+        };
+        current.downloads += 1;
+        dailyStats.set(key, current);
       }
       for (const occurredAt of delta.installNewEvents) {
-        await bumpDailySkillStats(ctx, { skillId: delta.skillId, now: occurredAt, installs: 1 });
+        const key = `${delta.skillId}:${toDayKey(occurredAt)}`;
+        const current = dailyStats.get(key) ?? {
+          skillId: delta.skillId,
+          occurredAt,
+          downloads: 0,
+          installs: 0,
+        };
+        current.installs += 1;
+        dailyStats.set(key, current);
       }
+    }
+
+    for (const stat of dailyStats.values()) {
+      await bumpDailySkillStats(ctx, {
+        skillId: stat.skillId,
+        now: stat.occurredAt,
+        downloads: stat.downloads,
+        installs: stat.installs,
+      });
     }
 
     // Update cursor position (upsert)
@@ -466,10 +497,10 @@ export const processSkillStatEventsAction = internalAction({
             skillDelta.downloadEvents.push(event.occurredAt);
             break;
           case "star":
-            skillDelta.stars += 1;
+            // Star counts are updated synchronously from `stars` mutations now.
             break;
           case "unstar":
-            skillDelta.stars -= 1;
+            // Historical queued unstar events should not double-apply.
             break;
           case "comment":
             skillDelta.comments += 1;

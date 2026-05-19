@@ -3,11 +3,7 @@ import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import type { ActionCtx } from "./_generated/server";
 import { internalAction, internalMutation, internalQuery } from "./functions";
-import {
-  countPublicSkillsForGlobalStats,
-  isPublicSkillDoc,
-  setGlobalPublicSkillsCount,
-} from "./lib/globalStats";
+import { isPublicSkillDoc, setGlobalPublicSkillsCount } from "./lib/globalStats";
 
 const DEFAULT_BATCH_SIZE = 200;
 const MAX_BATCH_SIZE = 1000;
@@ -183,25 +179,52 @@ export const runSkillStatBackfillInternal: ReturnType<typeof internalAction> = i
 
 function buildSkillStatPatch(skill: Doc<"skills">) {
   const stats = skill.stats;
-  const nextDownloads = stats.downloads;
-  const nextStars = stats.stars;
-  const nextInstallsCurrent = stats.installsCurrent ?? 0;
-  const nextInstallsAllTime = stats.installsAllTime ?? 0;
 
-  if (
+  // Prefer the top-level stat fields when they exist (they are kept up-to-date
+  // by applySkillStatDeltas on every event flush).  Fall back to the legacy
+  // nested `stats` object only for documents that pre-date the migration.
+  const nextDownloads =
+    typeof skill.statsDownloads === "number" ? skill.statsDownloads : stats.downloads;
+  const nextStars = typeof skill.statsStars === "number" ? skill.statsStars : stats.stars;
+  const nextInstallsCurrent =
+    typeof skill.statsInstallsCurrent === "number"
+      ? skill.statsInstallsCurrent
+      : (stats.installsCurrent ?? 0);
+  const nextInstallsAllTime =
+    typeof skill.statsInstallsAllTime === "number"
+      ? skill.statsInstallsAllTime
+      : (stats.installsAllTime ?? 0);
+
+  // Check whether both sets of fields are already in sync.
+  const topLevelInSync =
     skill.statsDownloads === nextDownloads &&
     skill.statsStars === nextStars &&
     skill.statsInstallsCurrent === nextInstallsCurrent &&
-    skill.statsInstallsAllTime === nextInstallsAllTime
-  ) {
+    skill.statsInstallsAllTime === nextInstallsAllTime;
+
+  const nestedInSync =
+    stats.downloads === nextDownloads &&
+    stats.stars === nextStars &&
+    (stats.installsCurrent ?? 0) === nextInstallsCurrent &&
+    (stats.installsAllTime ?? 0) === nextInstallsAllTime;
+
+  if (topLevelInSync && nestedInSync) {
     return null;
   }
 
+  // Write both sets of fields so they stay in sync.
   return {
     statsDownloads: nextDownloads,
     statsStars: nextStars,
     statsInstallsCurrent: nextInstallsCurrent,
     statsInstallsAllTime: nextInstallsAllTime,
+    stats: {
+      ...stats,
+      downloads: nextDownloads,
+      stars: nextStars,
+      installsCurrent: nextInstallsCurrent,
+      installsAllTime: nextInstallsAllTime,
+    },
   };
 }
 
@@ -215,63 +238,81 @@ function buildSkillStatPatch(skill: Doc<"skills">) {
  *
  * Downloads and installs are event-sourced only (no separate table to count from),
  * so they cannot be reconciled this way.
+ *
+ * Exported as a standalone function so it can be unit-tested directly without
+ * going through the Convex internalMutation wrapper.
  */
+export async function reconcileSkillStarCountsHandler(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: { db: { query: any; patch: any } },
+  args: { cursor?: string; batchSize?: number },
+) {
+  const batchSize = clampInt(args.batchSize ?? 50, 1, 200);
+  const now = Date.now();
+
+  const { page, isDone, continueCursor } = await ctx.db
+    .query("skills")
+    .order("asc")
+    .paginate({ cursor: args.cursor ?? null, numItems: batchSize });
+
+  let scanned = 0;
+  let patched = 0;
+  for (const skill of page) {
+    if (skill.softDeletedAt) continue;
+    scanned += 1;
+    // Count actual star records for this skill
+    const starRecords = await ctx.db
+      .query("stars")
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .withIndex("by_skill_user", (q: any) => q.eq("skillId", skill._id))
+      .collect();
+    const actualStars = starRecords.length;
+
+    // Count actual comment records for this skill
+    const commentRecords = await ctx.db
+      .query("comments")
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .withIndex("by_skill", (q: any) => q.eq("skillId", skill._id))
+      .collect();
+    const actualComments = commentRecords.filter(
+      (c: { softDeletedAt?: unknown }) => !c.softDeletedAt,
+    ).length;
+
+    // Check if stats are out of sync (compare against the canonical value
+    // used by toPublicSkill: prefer top-level field, fall back to nested).
+    const currentStars =
+      typeof skill.statsStars === "number" ? skill.statsStars : skill.stats.stars;
+
+    if (currentStars !== actualStars || skill.stats.comments !== actualComments) {
+      const updatedStats = {
+        ...skill.stats,
+        stars: actualStars,
+        comments: actualComments,
+      };
+      // Keep both the top-level index field and the legacy nested field in sync.
+      await ctx.db.patch(skill._id, {
+        statsStars: actualStars,
+        stats: updatedStats,
+        updatedAt: now,
+      });
+      patched += 1;
+    }
+  }
+
+  return {
+    scanned,
+    patched,
+    cursor: isDone ? null : continueCursor,
+    isDone,
+  };
+}
+
 export const reconcileSkillStarCounts = internalMutation({
   args: {
     cursor: v.optional(v.string()),
     batchSize: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    const batchSize = clampInt(args.batchSize ?? 50, 1, 200);
-    const now = Date.now();
-
-    const { page, isDone, continueCursor } = await ctx.db
-      .query("skills")
-      .order("asc")
-      .paginate({ cursor: args.cursor ?? null, numItems: batchSize });
-
-    let scanned = 0;
-    let patched = 0;
-    for (const skill of page) {
-      if (skill.softDeletedAt) continue;
-      scanned += 1;
-      // Count actual star records for this skill
-      const starRecords = await ctx.db
-        .query("stars")
-        .withIndex("by_skill_user", (q) => q.eq("skillId", skill._id))
-        .collect();
-      const actualStars = starRecords.length;
-
-      // Count actual comment records for this skill
-      const commentRecords = await ctx.db
-        .query("comments")
-        .withIndex("by_skill", (q) => q.eq("skillId", skill._id))
-        .collect();
-      const actualComments = commentRecords.filter((c) => !c.softDeletedAt).length;
-
-      // Check if stats are out of sync
-      if (skill.stats.stars !== actualStars || skill.stats.comments !== actualComments) {
-        const updatedStats = {
-          ...skill.stats,
-          stars: actualStars,
-          comments: actualComments,
-        };
-        await ctx.db.patch(skill._id, {
-          statsStars: actualStars,
-          stats: updatedStats,
-          updatedAt: now,
-        });
-        patched += 1;
-      }
-    }
-
-    return {
-      scanned,
-      patched,
-      cursor: isDone ? null : continueCursor,
-      isDone,
-    };
-  },
+  handler: reconcileSkillStarCountsHandler,
 });
 
 export const runReconcileSkillStarCountsInternal = internalAction({
@@ -307,6 +348,11 @@ export const runReconcileSkillStarCountsInternal = internalAction({
 function clampInt(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
+
+// Exported for unit testing only — not part of the public API.
+export const __test = {
+  buildSkillStatPatch,
+};
 
 /**
  * Count a page of skillSearchDigest docs and return the partial public count.
@@ -364,17 +410,5 @@ export const updateGlobalStatsAction = internalAction({
 
     await ctx.runMutation(internal.statsMaintenance.writeGlobalStatsInternal, { count: total });
     return { count: total };
-  },
-});
-
-/**
- * @deprecated Use updateGlobalStatsAction instead.
- * Kept as a manual emergency fallback only — do not re-add to crons.
- */
-export const updateGlobalStatsInternal = internalMutation({
-  args: {},
-  handler: async (ctx) => {
-    const count = await countPublicSkillsForGlobalStats(ctx);
-    await setGlobalPublicSkillsCount(ctx, count);
   },
 });

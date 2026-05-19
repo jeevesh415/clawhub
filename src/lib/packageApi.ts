@@ -47,6 +47,17 @@ export type PackageVersionDetail = {
     compatibility?: PackageCompatibility | null;
     capabilities?: PackageCapabilitySummary | null;
     verification?: PackageVerificationSummary | null;
+    artifact?: {
+      kind: "legacy-zip" | "npm-pack";
+      sha256?: string;
+      size?: number;
+      format?: string;
+      npmIntegrity?: string;
+      npmShasum?: string;
+      npmTarballName?: string;
+      npmUnpackedSize?: number;
+      npmFileCount?: number;
+    } | null;
     sha256hash?: string | null;
     vtAnalysis?: {
       status: string;
@@ -68,9 +79,46 @@ export type PackageVersionDetail = {
       }>;
       guidance?: string;
       findings?: string;
+      agenticRiskFindings?: Array<{
+        categoryId: string;
+        categoryLabel: string;
+        riskBucket:
+          | "abnormal_behavior_control"
+          | "permission_boundary"
+          | "sensitive_data_protection";
+        status: "none" | "note" | "concern";
+        severity: string;
+        confidence: "high" | "medium" | "low";
+        evidence?: {
+          path: string;
+          snippet: string;
+          explanation: string;
+        };
+        userImpact: string;
+        recommendation: string;
+      }>;
+      riskSummary?: {
+        abnormal_behavior_control: {
+          status: "none" | "note" | "concern";
+          summary: string;
+          highestSeverity?: string;
+        };
+        permission_boundary: {
+          status: "none" | "note" | "concern";
+          summary: string;
+          highestSeverity?: string;
+        };
+        sensitive_data_protection: {
+          status: "none" | "note" | "concern";
+          summary: string;
+          highestSeverity?: string;
+        };
+      };
       model?: string;
       checkedAt: number;
     } | null;
+    clawScanNote?: string | null;
+    clawScanNoteUpdatedAt?: number | null;
     staticScan?: {
       status: string;
       reasonCodes: string[];
@@ -128,15 +176,36 @@ function normalizeApiPath(path: string) {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+function resolveAbsoluteBaseUrl(...candidates: Array<string | undefined>) {
+  for (const candidate of candidates) {
+    const value = candidate?.trim();
+    if (!value) continue;
+    try {
+      return new URL(value).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 async function packageApiUrl(path: string) {
   const normalizedPath = normalizeApiPath(path);
   if (typeof window !== "undefined") {
     // In production, Vercel rewrites /api/* to the Convex site, so relative
     // paths work. In local dev, Nitro intercepts the request before Vite's
     // proxy, so we must use the Convex site URL directly.
-    const convexSiteUrl = getRuntimeEnv("VITE_CONVEX_SITE_URL");
-    if (convexSiteUrl && window.location.hostname === "localhost") {
-      return new URL(normalizedPath, convexSiteUrl);
+    const convexClientBaseUrl = resolveAbsoluteBaseUrl(
+      getRuntimeEnv("VITE_CONVEX_SITE_URL"),
+      getRuntimeEnv("VITE_CONVEX_URL"),
+    );
+    if (
+      convexClientBaseUrl &&
+      (window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1" ||
+        window.location.hostname === "0.0.0.0")
+    ) {
+      return new URL(normalizedPath, convexClientBaseUrl);
     }
     return new URL(normalizedPath, window.location.origin);
   }
@@ -144,7 +213,11 @@ async function packageApiUrl(path: string) {
   // In production, Vercel rewrites /api/* but SSR loaders run server-side
   // where the rewrite doesn't apply. Using getRequestUrl() would loop back
   // into TanStack Start / Nitro, which rejects non-HTML requests.
-  const base = getRuntimeEnv("VITE_CONVEX_SITE_URL") ?? getRequiredRuntimeEnv("VITE_CONVEX_URL");
+  const base =
+    resolveAbsoluteBaseUrl(
+      getRuntimeEnv("VITE_CONVEX_SITE_URL"),
+      getRuntimeEnv("VITE_CONVEX_URL"),
+    ) ?? getRequiredRuntimeEnv("VITE_CONVEX_URL");
   return new URL(normalizedPath, base);
 }
 
@@ -152,6 +225,14 @@ export function getPackageDownloadPath(name: string, version?: string | null) {
   const path = normalizeApiPath(`${ApiRoutes.packages}/${encodeURIComponent(name)}/download`);
   if (!version) return path;
   return `${path}?version=${encodeURIComponent(version)}`;
+}
+
+export function getPackageArtifactDownloadPath(name: string, version: string) {
+  return normalizeApiPath(
+    `${ApiRoutes.packages}/${encodeURIComponent(name)}/versions/${encodeURIComponent(
+      version,
+    )}/artifact/download`,
+  );
 }
 
 async function getForwardedHeaders() {
@@ -183,7 +264,7 @@ async function getForwardedHeaders() {
   }
 }
 
-async function packageFetch(url: URL, accept: string) {
+async function packageFetch(url: URL, accept: string, signal?: AbortSignal) {
   const forwarded = await getForwardedHeaders();
   const isSameOrigin = typeof window !== "undefined" && url.origin === window.location.origin;
   return await fetch(url.toString(), {
@@ -197,6 +278,7 @@ async function packageFetch(url: URL, accept: string) {
       Accept: accept,
       ...forwarded,
     },
+    signal,
   });
 }
 
@@ -213,14 +295,34 @@ function parseRetryAfterSeconds(value: string | null): number | null {
 
 async function createPackageApiError(response: Response) {
   const body = (await response.text()).trim();
-  return new PackageApiError(body || `Request failed with status ${response.status}`, {
+  return new PackageApiError(normalizePackageApiErrorBody(response.status, body), {
     status: response.status,
     retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("Retry-After")),
   });
 }
 
-async function fetchJson<T>(url: URL): Promise<T> {
-  const response = await packageFetch(url, "application/json");
+function normalizePackageApiErrorBody(status: number, body: string) {
+  const lowered = body.toLowerCase();
+  if (body && lowered !== "unauthorized" && lowered !== "forbidden") {
+    if (status === 404 && lowered === "package not found") {
+      return "Package not found or not visible to this account.";
+    }
+    if (status === 404 && lowered === "skill not found") {
+      return "Skill not found or unavailable to this account.";
+    }
+    return body;
+  }
+  if (status === 401) {
+    return "Sign in required. If this ClawHub account was deleted, banned, or disabled, it cannot access private packages.";
+  }
+  if (status === 403) {
+    return "This ClawHub account does not have access to this package or action, or the account is not in good standing.";
+  }
+  return body || `Request failed with status ${status}`;
+}
+
+async function fetchJson<T>(url: URL, signal?: AbortSignal): Promise<T> {
+  const response = await packageFetch(url, "application/json", signal);
   if (!response.ok) throw await createPackageApiError(response);
   return (await response.json()) as T;
 }
@@ -230,9 +332,12 @@ export async function fetchPackages(params: {
   cursor?: string;
   family?: "skill" | "code-plugin" | "bundle-plugin";
   isOfficial?: boolean;
+  featured?: boolean;
   executesCode?: boolean;
   capabilityTag?: string;
+  category?: string;
   limit?: number;
+  signal?: AbortSignal;
 }) {
   if (params.q?.trim()) {
     const url = await packageApiUrl(`${ApiRoutes.packages}/search`);
@@ -242,11 +347,18 @@ export async function fetchPackages(params: {
     if (typeof params.isOfficial === "boolean") {
       url.searchParams.set("isOfficial", String(params.isOfficial));
     }
+    if (params.featured) url.searchParams.set("featured", "true");
     if (typeof params.executesCode === "boolean") {
       url.searchParams.set("executesCode", String(params.executesCode));
     }
     if (params.capabilityTag) url.searchParams.set("capabilityTag", params.capabilityTag);
-    return await fetchJson<{ results: Array<{ score: number; package: PackageListItem }> }>(url);
+    if (params.category) url.searchParams.set("category", params.category);
+    return await fetchJson<{
+      results: Array<{
+        score: number;
+        package: PackageListItem;
+      }>;
+    }>(url, params.signal);
   }
 
   const route =
@@ -262,11 +374,16 @@ export async function fetchPackages(params: {
   if (typeof params.isOfficial === "boolean") {
     url.searchParams.set("isOfficial", String(params.isOfficial));
   }
+  if (params.featured) url.searchParams.set("featured", "true");
   if (typeof params.executesCode === "boolean") {
     url.searchParams.set("executesCode", String(params.executesCode));
   }
   if (params.capabilityTag) url.searchParams.set("capabilityTag", params.capabilityTag);
-  return await fetchJson<{ items: PackageListItem[]; nextCursor: string | null }>(url);
+  if (params.category) url.searchParams.set("category", params.category);
+  return await fetchJson<{ items: PackageListItem[]; nextCursor: string | null }>(
+    url,
+    params.signal,
+  );
 }
 
 export async function fetchPluginCatalog(params: {
@@ -274,8 +391,11 @@ export async function fetchPluginCatalog(params: {
   cursor?: string;
   family?: PluginFamily;
   isOfficial?: boolean;
+  featured?: boolean;
   executesCode?: boolean;
+  category?: string;
   limit?: number;
+  signal?: AbortSignal;
 }): Promise<PluginCatalogResult> {
   if (params.family) {
     const response = await fetchPackages({
@@ -283,20 +403,23 @@ export async function fetchPluginCatalog(params: {
       cursor: params.cursor,
       family: params.family,
       isOfficial: params.isOfficial,
+      featured: params.featured,
       executesCode: params.executesCode,
+      category: params.category,
       limit: params.limit,
+      signal: params.signal,
     });
     if (hasOwnProperty(response, "results") && Array.isArray(response.results)) {
       return {
-        items: response.results.map((entry) => entry.package),
+        items: response.results.map((entry) => entry?.package).filter(Boolean),
         nextCursor: null,
       };
     }
 
     const browseResponse = response as PackageCatalogBrowseResponse;
     return {
-      items: browseResponse.items,
-      nextCursor: browseResponse.nextCursor,
+      items: browseResponse?.items ?? [],
+      nextCursor: browseResponse?.nextCursor ?? null,
     };
   }
 
@@ -307,14 +430,19 @@ export async function fetchPluginCatalog(params: {
     if (typeof params.isOfficial === "boolean") {
       url.searchParams.set("isOfficial", String(params.isOfficial));
     }
+    if (params.featured) url.searchParams.set("featured", "true");
     if (typeof params.executesCode === "boolean") {
       url.searchParams.set("executesCode", String(params.executesCode));
     }
+    if (params.category) url.searchParams.set("category", params.category);
     const response = await fetchJson<{
-      results: Array<{ score: number; package: PackageListItem }>;
-    }>(url);
+      results?: Array<{
+        score: number;
+        package: PackageListItem;
+      }>;
+    }>(url, params.signal);
     return {
-      items: response.results.map((entry) => entry.package),
+      items: (response?.results ?? []).map((entry) => entry?.package).filter(Boolean),
       nextCursor: null,
     };
   }
@@ -325,38 +453,54 @@ export async function fetchPluginCatalog(params: {
   if (typeof params.isOfficial === "boolean") {
     url.searchParams.set("isOfficial", String(params.isOfficial));
   }
+  if (params.featured) url.searchParams.set("featured", "true");
   if (typeof params.executesCode === "boolean") {
     url.searchParams.set("executesCode", String(params.executesCode));
   }
-  return await fetchJson<PluginCatalogResult>(url);
+  if (params.category) url.searchParams.set("category", params.category);
+  const result = await fetchJson<PluginCatalogResult>(url, params.signal);
+  return {
+    items: result?.items ?? [],
+    nextCursor: result?.nextCursor ?? null,
+  };
 }
 
-export async function fetchPackageDetail(name: string) {
+export async function fetchPackageDetail(name: string): Promise<PackageDetailResponse> {
   const url = await packageApiUrl(`${ApiRoutes.packages}/${encodeURIComponent(name)}`);
   const response = await packageFetch(url, "application/json");
   if (response.status === 404) {
-    return {
-      package: null,
-      owner: null,
-    } satisfies PackageDetailResponse;
+    return { package: null, owner: null };
   }
   if (!response.ok) throw await createPackageApiError(response);
   return (await response.json()) as PackageDetailResponse;
 }
 
-export async function fetchPackageVersion(name: string, version: string) {
-  const url = await packageApiUrl(
-    `${ApiRoutes.packages}/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`,
-  );
-  return await fetchJson<PackageVersionDetail>(url);
+export async function fetchPackageVersion(
+  name: string,
+  version: string,
+): Promise<PackageVersionDetail | null> {
+  try {
+    const url = await packageApiUrl(
+      `${ApiRoutes.packages}/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`,
+    );
+    return await fetchJson<PackageVersionDetail>(url);
+  } catch {
+    // Return null on API error to prevent SSR crashes
+    return null;
+  }
 }
 
-export async function fetchPackageReadme(name: string, version?: string | null) {
+export async function fetchPackageReadme(
+  name: string,
+  version?: string | null,
+): Promise<string | null> {
   const url = await packageApiUrl(`${ApiRoutes.packages}/${encodeURIComponent(name)}/file`);
   url.searchParams.set("path", "README.md");
   if (version) url.searchParams.set("version", version);
   const response = await packageFetch(url, "text/plain");
   if (response.ok) return await response.text();
-  if (response.status === 403 || response.status === 423 || response.status === 404) return null;
+  if (response.status === 403 || response.status === 404 || response.status === 423) {
+    return null;
+  }
   throw await createPackageApiError(response);
 }

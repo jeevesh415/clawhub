@@ -1,56 +1,82 @@
 ---
-summary: "Auth overview: GitHub OAuth (web) + API tokens (CLI)."
+summary: "ClawHub sign-in, API tokens, CLI login, token storage, and revocation."
 read_when:
-  - Working on login/token flows
+  - Signing in to ClawHub
+  - Using the ClawHub CLI
   - Debugging 401s
 ---
 
 # Auth
 
-## Web auth (GitHub OAuth)
+ClawHub uses GitHub for web sign-in. The CLI uses ClawHub API tokens created
+through that signed-in account.
 
-- Convex Auth + GitHub OAuth App.
-- GitHub is the only supported login provider.
-- Disabled/banned accounts are blocked during OAuth completion and should surface a user-facing reason instead of a generic auth failure.
-- Env vars:
-  - `AUTH_GITHUB_ID`
-  - `AUTH_GITHUB_SECRET`
-  - `CONVEX_SITE_URL` (used by auth config)
+## Web sign-in
 
-Local setup steps are in the repo root `README.md`.
+Use GitHub to sign in at [clawhub.ai](https://clawhub.ai).
 
-## API tokens (CLI)
+Deleted, banned, or disabled accounts cannot complete normal ClawHub sign-in.
+If sign-in returns you to a logged-out state, your account may not be in good
+standing.
 
-The CLI uses a long-lived API token (Bearer token) for publish/sync/delete.
+## CLI login
 
-### Browser flow (default)
+The default CLI login flow opens your browser:
 
-`clawhub login` does:
+```bash
+clawhub login
+clawhub whoami
+```
 
-1. Starts a loopback HTTP server on `127.0.0.1` (random port).
-2. Opens `<site>/cli/auth?redirect_uri=http://127.0.0.1:<port>/callback&state=...`.
-3. Web UI requires GitHub login, then creates a token and redirects back to the loopback server.
-4. CLI stores the token in the global config file.
+What happens:
 
-### Headless flow
+1. The CLI starts a temporary callback server on `127.0.0.1`.
+2. Your browser opens the ClawHub sign-in page.
+3. After GitHub sign-in, ClawHub creates an API token.
+4. The browser redirects back to the local callback.
+5. The CLI stores the token in your ClawHub config file.
 
-Create a token in the web UI (Settings → API tokens) and paste it:
+If your browser cannot reach the local callback because of firewall, VPN, or
+proxy rules, use the headless token flow.
+
+## Headless login
+
+Create a token in the ClawHub web UI, then pass it to the CLI:
 
 ```bash
 clawhub login --token clh_...
 ```
 
-### Token storage
+Use this flow for servers, CI jobs, or terminal-only environments.
 
-Default global config path:
+For remote shells where you can open a browser elsewhere, run:
+
+```bash
+clawhub login --device
+```
+
+The CLI prints a one-time code and waits while you authorize it at
+`https://clawhub.ai/cli/device`.
+
+## Token storage
+
+Default config paths:
 
 - macOS: `~/Library/Application Support/clawhub/config.json`
+- Linux/XDG: `$XDG_CONFIG_HOME/clawhub/config.json` or `~/.config/clawhub/config.json`
+- Windows: `%APPDATA%\\clawhub\\config.json`
 
-Override:
+Override the path with:
 
-- `CLAWHUB_CONFIG_PATH=/path/to/config.json` (legacy `CLAWDHUB_CONFIG_PATH`)
+```bash
+export CLAWHUB_CONFIG_PATH=/path/to/config.json
+```
 
-### Revocation
+## Revocation
 
-- Tokens can be revoked in the web UI.
-- Revoked tokens return `401 Unauthorized` on CLI endpoints.
+You can revoke API tokens in the ClawHub web UI.
+
+Revoked, invalid, or missing tokens return `401 Unauthorized`. Sign in again
+with `clawhub login` or provide a fresh token with `clawhub login --token`.
+
+Deleted, banned, or disabled accounts cannot continue using existing API tokens.

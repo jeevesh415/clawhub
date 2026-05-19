@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 // Tiny external store for auth errors raised during sign-in.
+// Syncs across components in this tab.
 let authError: string | null = null;
 const listeners = new Set<() => void>();
 

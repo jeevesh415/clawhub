@@ -33,3 +33,11 @@ export async function expectHealthyPage(page: Page, errors: string[]) {
   await expectNoFatalErrorUi(page);
   await expectNoRuntimeErrors(page, errors);
 }
+
+export async function waitForHydration(page: Page) {
+  await page.waitForFunction(
+    () => document.documentElement.dataset.clawhubHydrated === "true",
+    undefined,
+    { timeout: 15_000 },
+  );
+}

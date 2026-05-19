@@ -11,90 +11,25 @@ import {
   parseArk,
 } from "clawhub-schema";
 import { unzipSync } from "fflate";
-import { Agent, setGlobalDispatcher } from "undici";
 import { describe, expect, it } from "vitest";
 import { readGlobalConfig } from "../packages/clawhub/src/config";
-
-const REQUEST_TIMEOUT_MS = 15_000;
-
-try {
-  setGlobalDispatcher(
-    new Agent({
-      connect: { timeout: REQUEST_TIMEOUT_MS },
-    }),
-  );
-} catch {
-  // ignore dispatcher setup failures
-}
-
-function mustGetToken() {
-  const fromEnv = process.env.CLAWHUB_E2E_TOKEN?.trim() || process.env.CLAWDHUB_E2E_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
-  return null;
-}
-
-function getRegistry() {
-  return (
-    process.env.CLAWHUB_REGISTRY?.trim() ||
-    process.env.CLAWDHUB_REGISTRY?.trim() ||
-    "https://clawhub.ai"
-  );
-}
-
-function getSite() {
-  return (
-    process.env.CLAWHUB_SITE?.trim() || process.env.CLAWDHUB_SITE?.trim() || "https://clawhub.ai"
-  );
-}
-
-function buildE2ESkillMarkdown(slug: string) {
-  return `# ${slug}
-
-## What it does
-
-This skill is used by the ClawHub CLI end-to-end suite to verify publish, install,
-update, delete, and undelete flows against a real registry.
-
-## Usage
-
-- Run the skill after installation to confirm the package can be discovered.
-- Use the published version history to verify update behavior.
-- Delete and undelete the listing to confirm ownership actions still work.
-
-## Notes
-
-This content is intentionally specific and non-templated so the publish pipeline
-accepts it during automated tests.
-`;
-}
-
-function allowLiveMutations() {
-  const value = process.env.CLAWHUB_E2E_ALLOW_MUTATIONS?.trim();
-  return value === "1" || value?.toLowerCase() === "true";
-}
+import {
+  allowLiveMutations,
+  buildE2ESkillMarkdown,
+  fetchWithTimeout,
+  getAdminToken,
+  getRegistry,
+  getSite,
+  getUserToken,
+  makeTempConfig,
+  mustGetToken,
+  resolveRoleHelpTokens,
+  shouldSeedRoleHelpTokens,
+} from "./helpers/clawhubCli";
 
 const itIfLiveMutations = allowLiveMutations() ? it : it.skip;
-
-async function makeTempConfig(registry: string, token: string | null) {
-  const dir = await mkdtemp(join(tmpdir(), "clawhub-e2e-"));
-  const path = join(dir, "config.json");
-  await writeFile(
-    path,
-    `${JSON.stringify({ registry, token: token || undefined }, null, 2)}\n`,
-    "utf8",
-  );
-  return { dir, path };
-}
-
-async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error("Timeout")), REQUEST_TIMEOUT_MS);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+const itIfAdminAndUserTokens =
+  (getAdminToken() && getUserToken()) || shouldSeedRoleHelpTokens() ? it : it.skip;
 
 describe("clawhub e2e", () => {
   it("prints CLI version via --cli-version", async () => {
@@ -194,6 +129,65 @@ describe("clawhub e2e", () => {
       expect(result.stderr).not.toMatch(/not logged in|unauthorized|error:/i);
     } finally {
       await rm(cfg.dir, { recursive: true, force: true });
+    }
+  });
+
+  itIfAdminAndUserTokens("shows moderator CLI commands only in admin help", async () => {
+    const registry = getRegistry();
+    const site = getSite();
+    const { adminToken, userToken } = await resolveRoleHelpTokens(registry);
+
+    async function expectRole(token: string, expectedRole: "admin" | "user") {
+      const whoamiUrl = new URL(ApiRoutes.whoami, registry);
+      const response = await fetchWithTimeout(whoamiUrl.toString(), {
+        headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+      });
+      expect(response.ok).toBe(true);
+      const whoami = parseArk(
+        ApiV1WhoamiResponseSchema,
+        (await response.json()) as unknown,
+        "Whoami",
+      );
+      expect(whoami.user.role).toBe(expectedRole);
+    }
+
+    await expectRole(adminToken, "admin");
+    await expectRole(userToken, "user");
+
+    const adminCfg = await makeTempConfig(registry, adminToken);
+    const userCfg = await makeTempConfig(registry, userToken);
+    try {
+      const baseEnv = { ...process.env, CLAWHUB_DISABLE_TELEMETRY: "1" };
+      const adminResult = spawnSync(
+        "bun",
+        ["clawhub", "--registry", registry, "--site", site, "--help"],
+        {
+          cwd: process.cwd(),
+          env: { ...baseEnv, CLAWHUB_CONFIG_PATH: adminCfg.path },
+          encoding: "utf8",
+        },
+      );
+      const userResult = spawnSync(
+        "bun",
+        ["clawhub", "--registry", registry, "--site", site, "--help"],
+        {
+          cwd: process.cwd(),
+          env: { ...baseEnv, CLAWHUB_CONFIG_PATH: userCfg.path },
+          encoding: "utf8",
+        },
+      );
+
+      expect(adminResult.status).toBe(0);
+      expect(adminResult.stdout).toContain("ban-user");
+      expect(adminResult.stdout).toContain("unban-user");
+      expect(adminResult.stdout).toContain("set-role");
+      expect(userResult.status).toBe(0);
+      expect(userResult.stdout).not.toContain("ban-user");
+      expect(userResult.stdout).not.toContain("unban-user");
+      expect(userResult.stdout).not.toContain("set-role");
+    } finally {
+      await rm(adminCfg.dir, { recursive: true, force: true });
+      await rm(userCfg.dir, { recursive: true, force: true });
     }
   });
 

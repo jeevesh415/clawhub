@@ -40,7 +40,7 @@ function runBeforeLoad(search: Record<string, unknown>) {
 
 describe("skills route default sort", () => {
   it("redirects browse view to downloads when sort is missing", () => {
-    expect(runBeforeLoad({ nonSuspicious: true })).toEqual({
+    expect(runBeforeLoad({})).toEqual({
       redirect: {
         to: "/skills",
         search: {
@@ -48,7 +48,7 @@ describe("skills route default sort", () => {
           sort: "downloads",
           dir: undefined,
           highlighted: undefined,
-          nonSuspicious: true,
+          featured: undefined,
           tag: undefined,
           view: undefined,
           focus: undefined,
@@ -60,5 +60,10 @@ describe("skills route default sort", () => {
 
   it("does not redirect when query is present", () => {
     expect(runBeforeLoad({ q: "notion" })).toBeUndefined();
+  });
+
+  it("does not redirect when filters are present", () => {
+    expect(runBeforeLoad({ featured: true })).toBeUndefined();
+    expect(runBeforeLoad({ highlighted: true })).toBeUndefined();
   });
 });

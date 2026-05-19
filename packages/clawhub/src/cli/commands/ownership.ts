@@ -44,7 +44,7 @@ export async function cmdRenameSkill(
     inputAllowed,
     `Rename ${slug} to ${newSlug}? Old slug will redirect.`,
   );
-  if (!confirmed) return;
+  if (!confirmed) return undefined;
 
   const token = await requireAuthToken();
   const registry = await getRegistry(opts, { cache: true });
@@ -57,7 +57,7 @@ export async function cmdRenameSkill(
         method: "POST",
         path: `${ApiRoutes.skills}/${encodeURIComponent(slug)}/rename`,
         token,
-        body: JSON.stringify({ newSlug }),
+        body: { newSlug },
       },
       ApiV1SkillRenameResponseSchema,
     );
@@ -86,7 +86,7 @@ export async function cmdMergeSkill(
     inputAllowed,
     `Merge ${sourceSlug} into ${targetSlug}? Source slug will redirect and stop listing publicly.`,
   );
-  if (!confirmed) return;
+  if (!confirmed) return undefined;
 
   const token = await requireAuthToken();
   const registry = await getRegistry(opts, { cache: true });
@@ -99,7 +99,7 @@ export async function cmdMergeSkill(
         method: "POST",
         path: `${ApiRoutes.skills}/${encodeURIComponent(sourceSlug)}/merge`,
         token,
-        body: JSON.stringify({ targetSlug }),
+        body: { targetSlug },
       },
       ApiV1SkillMergeResponseSchema,
     );

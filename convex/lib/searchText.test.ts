@@ -1,7 +1,12 @@
 /* @vitest-environment node */
 
 import { describe, expect, it } from "vitest";
-import { __test, matchesExactTokens, tokenize } from "./searchText";
+import {
+  __test,
+  matchesExactTokens,
+  matchesExploratoryTokenPrefixes,
+  tokenize,
+} from "./searchText";
 
 describe("searchText", () => {
   it("tokenize lowercases and splits on punctuation", () => {
@@ -13,17 +18,18 @@ describe("searchText", () => {
     ]);
   });
 
-  it("matchesExactTokens requires at least one query token to prefix-match", () => {
+  it("matchesExactTokens requires every query token to prefix-match", () => {
     const queryTokens = tokenize("Remind Me");
     expect(matchesExactTokens(queryTokens, ["Remind Me", "/remind-me", "Short summary"])).toBe(
       true,
     );
-    // "Reminder" starts with "remind", so it matches with prefix matching
+    // "Reminder" starts with "remind", but no token matches "me".
     expect(matchesExactTokens(queryTokens, ["Reminder tool", "/reminder", "Short summary"])).toBe(
-      true,
+      false,
     );
-    // Matches because "remind" token is present
-    expect(matchesExactTokens(queryTokens, ["Remind tool", "/remind", "Short summary"])).toBe(true);
+    expect(matchesExactTokens(queryTokens, ["Remind tool", "/remind", "Short summary"])).toBe(
+      false,
+    );
     // No matching tokens at all
     expect(matchesExactTokens(queryTokens, ["Other tool", "/other", "Short summary"])).toBe(false);
   });
@@ -42,6 +48,18 @@ describe("searchText", () => {
   it("matchesExactTokens ignores empty inputs", () => {
     expect(matchesExactTokens([], ["text"])).toBe(false);
     expect(matchesExactTokens(["token"], ["  ", null, undefined])).toBe(false);
+  });
+
+  it("requires every query token to meet the exploratory minimum", () => {
+    expect(matchesExploratoryTokenPrefixes(tokenize("postgres"), ["Postgres database"], 3)).toBe(
+      true,
+    );
+    expect(matchesExploratoryTokenPrefixes(tokenize("ai postgres"), ["Postgres database"], 3)).toBe(
+      false,
+    );
+    expect(matchesExploratoryTokenPrefixes(tokenize("pg database"), ["Database tools"], 3)).toBe(
+      false,
+    );
   });
 
   it("normalize uses lowercase", () => {

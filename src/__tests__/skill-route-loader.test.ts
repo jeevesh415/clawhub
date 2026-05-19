@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 process.env.VITE_CONVEX_URL = process.env.VITE_CONVEX_URL || "https://example.convex.cloud";
 
 const fetchSkillPageDataMock = vi.fn();
+const resolveOpenClawPluginSlugMock = vi.fn();
 
 vi.mock("../convex/client", () => ({
   convex: {},
@@ -17,10 +18,12 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute:
     () =>
     (config: {
+      beforeLoad?: (args: { params: { owner: string; slug: string } }) => unknown;
       loader?: (args: { params: { owner: string; slug: string } }) => Promise<unknown>;
       component?: unknown;
       head?: unknown;
     }) => ({ __config: config }),
+  notFound: () => ({ notFound: true }),
   redirect: (options: unknown) => ({ redirect: options }),
 }));
 
@@ -28,9 +31,14 @@ vi.mock("../lib/skillPage", () => ({
   fetchSkillPageData: (...args: unknown[]) => fetchSkillPageDataMock(...args),
 }));
 
+vi.mock("../lib/slugRoute", () => ({
+  resolveOpenClawPluginSlug: (...args: unknown[]) => resolveOpenClawPluginSlugMock(...args),
+}));
+
 async function loadRoute() {
   return (await import("../routes/$owner/$slug")).Route as unknown as {
     __config: {
+      beforeLoad?: (args: { params: { owner: string; slug: string } }) => unknown;
       loader?: (args: { params: { owner: string; slug: string } }) => Promise<unknown>;
       head?: (args: {
         params: { owner: string; slug: string };
@@ -43,6 +51,14 @@ async function loadRoute() {
       }) => unknown;
     };
   };
+}
+
+async function runBeforeLoad(params: { owner: string; slug: string }) {
+  const route = await loadRoute();
+  const beforeLoad = route.__config.beforeLoad as
+    | ((args: { params: { owner: string; slug: string } }) => unknown)
+    | undefined;
+  return beforeLoad?.({ params });
 }
 
 async function runLoader(params: { owner: string; slug: string }) {
@@ -71,11 +87,70 @@ function runHead(
 }
 
 describe("skill route loader", () => {
+  it("allows numeric owner handles in beforeLoad", () => {
+    expect(() => runBeforeLoad({ owner: "123abc", slug: "weather" })).not.toThrow();
+  });
+
+  it("allows raw owner ids in beforeLoad", () => {
+    expect(() => runBeforeLoad({ owner: "users:abc123", slug: "weather" })).not.toThrow();
+  });
+
+  it("allows raw publisher ids in beforeLoad", () => {
+    expect(() => runBeforeLoad({ owner: "publishers:abc123", slug: "weather" })).not.toThrow();
+  });
+
+  it("allows npm-style scopes in beforeLoad", () => {
+    expect(() => runBeforeLoad({ owner: "@openclaw", slug: "codex" })).not.toThrow();
+  });
+
   beforeEach(() => {
     fetchSkillPageDataMock.mockReset();
+    resolveOpenClawPluginSlugMock.mockReset();
+  });
+
+  it("redirects OpenClaw plugin slugs before skill slug lookup", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue({
+      kind: "plugin",
+      name: "@openclaw/codex",
+      href: "/plugins/@openclaw/codex",
+    });
+
+    expect(await runLoader({ owner: "openclaw", slug: "codex" })).toEqual({
+      redirect: {
+        href: "/plugins/@openclaw/codex",
+        replace: true,
+      },
+    });
+    expect(resolveOpenClawPluginSlugMock).toHaveBeenCalledWith("codex", "openclaw");
+    expect(fetchSkillPageDataMock).not.toHaveBeenCalled();
+  });
+
+  it("redirects npm-style OpenClaw scoped plugin aliases before skill lookup", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue({
+      kind: "plugin",
+      name: "@openclaw/codex",
+      href: "/plugins/@openclaw/codex",
+    });
+
+    expect(await runLoader({ owner: "@openclaw", slug: "codex" })).toEqual({
+      redirect: {
+        href: "/plugins/@openclaw/codex",
+        replace: true,
+      },
+    });
+    expect(resolveOpenClawPluginSlugMock).toHaveBeenCalledWith("codex", "@openclaw");
+    expect(fetchSkillPageDataMock).not.toHaveBeenCalled();
+  });
+
+  it("does not resolve unsupported npm-style scopes as skill slugs", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue(null);
+
+    expect(await runLoader({ owner: "@someone", slug: "weather" })).toEqual({ notFound: true });
+    expect(fetchSkillPageDataMock).not.toHaveBeenCalled();
   });
 
   it("redirects to the canonical owner and slug from loader data", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue(null);
     fetchSkillPageDataMock.mockResolvedValue({
       owner: "steipete",
       displayName: "Weather",
@@ -122,6 +197,7 @@ describe("skill route loader", () => {
   });
 
   it("returns initial page data when the route is already canonical", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue(null);
     fetchSkillPageDataMock.mockResolvedValue({
       owner: "steipete",
       displayName: "Weather",
@@ -170,6 +246,7 @@ describe("skill route loader", () => {
   });
 
   it("does not redirect when canonical owner data is missing", async () => {
+    resolveOpenClawPluginSlugMock.mockResolvedValue(null);
     fetchSkillPageDataMock.mockResolvedValue({
       owner: null,
       displayName: "Weather",
@@ -258,11 +335,11 @@ describe("skill route loader", () => {
         { property: "og:url", content: "https://clawhub.ai/steipete/weather" },
         {
           property: "og:image",
-          content: "https://clawhub.ai/og/skill.png?v=5&slug=weather&owner=steipete&version=1.0.0",
+          content: "https://clawhub.ai/og/skill?v=7&slug=weather&owner=steipete&version=1.0.0",
         },
         {
           name: "twitter:image",
-          content: "https://clawhub.ai/og/skill.png?v=5&slug=weather&owner=steipete&version=1.0.0",
+          content: "https://clawhub.ai/og/skill?v=7&slug=weather&owner=steipete&version=1.0.0",
         },
       ]),
     );

@@ -1,5 +1,26 @@
 import { type } from "arktype";
+import { DocsLinks } from "./docsLinks.js";
 import { CliPublishFileSchema, PublishSourceSchema } from "./schemas.js";
+export function normalizePackageOwnerHandle(handle) {
+    const normalized = handle?.trim().replace(/^@+/, "").toLowerCase();
+    return normalized || undefined;
+}
+export function inferPackageNameScope(name) {
+    return /^@([^/]+)\//.exec(name.trim().toLowerCase())?.[1];
+}
+export function getPackageScopeOwnerMismatch(name, ownerHandle) {
+    const scope = inferPackageNameScope(name);
+    const selectedOwner = normalizePackageOwnerHandle(ownerHandle);
+    if (!scope || !selectedOwner || scope === selectedOwner)
+        return null;
+    const packageSlug = name.split("/").pop()?.trim() || "plugin-name";
+    return {
+        scope,
+        selectedOwner,
+        suggestedName: `@${selectedOwner}/${packageSlug}`,
+        message: `Package scope "@${scope}" must match selected owner "@${selectedOwner}". Publish as "@${scope}" or rename this package to "@${selectedOwner}/${packageSlug}". More info: ${DocsLinks.clawhub.packageScopeFaq}`,
+    };
+}
 export const PackageFamilySchema = type('"skill"|"code-plugin"|"bundle-plugin"');
 export const PackageChannelSchema = type('"official"|"community"|"private"');
 export const PackageVerificationTierSchema = type('"structural"|"source-linked"|"provenance-verified"|"rebuild-verified"');
@@ -38,6 +59,7 @@ export const PackageVerificationSummarySchema = type({
     sourceCommit: "string?",
     sourceTag: "string?",
     hasProvenance: "boolean?",
+    trustedOpenClawPlugin: "boolean?",
     scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"?',
 });
 export const PackageStatsSchema = type({
@@ -45,6 +67,44 @@ export const PackageStatsSchema = type({
     installs: "number",
     stars: "number",
     versions: "number",
+});
+export const PackageArtifactKindSchema = type('"legacy-zip"|"npm-pack"');
+export const PackageReleaseModerationStateSchema = type('"approved"|"quarantined"|"revoked"');
+export const PackageReportStatusSchema = type('"open"|"confirmed"|"dismissed"');
+export const PackageReportFinalActionSchema = type('"none"|"quarantine"|"revoke"');
+export const PackageReportListStatusSchema = PackageReportStatusSchema.or('"all"');
+export const PackageAppealStatusSchema = type('"open"|"accepted"|"rejected"');
+export const PackageAppealFinalActionSchema = type('"none"|"approve"');
+export const PackageAppealListStatusSchema = PackageAppealStatusSchema.or('"all"');
+export const PackageOfficialMigrationPhaseSchema = type('"planned"|"published"|"clawpack-ready"|"legacy-zip-only"|"metadata-ready"|"blocked"|"ready-for-openclaw"');
+export const PackageOfficialMigrationListPhaseSchema = PackageOfficialMigrationPhaseSchema.or('"all"');
+export const PackageArtifactSummarySchema = type({
+    kind: PackageArtifactKindSchema,
+    sha256: "string?",
+    size: "number?",
+    format: "string?",
+    npmIntegrity: "string?",
+    npmShasum: "string?",
+    npmTarballName: "string?",
+    npmUnpackedSize: "number?",
+    npmFileCount: "number?",
+    source: '"clawhub"?',
+    artifactKind: PackageArtifactKindSchema.optional(),
+    artifactSha256: "string?",
+    packageName: "string?",
+    version: "string?",
+});
+export const PackagePublishArtifactSchema = type({
+    kind: '"npm-pack"',
+    storageId: "string",
+    sha256: "string",
+    size: "number",
+    format: '"tgz"',
+    npmIntegrity: "string",
+    npmShasum: "string",
+    npmTarballName: "string",
+    npmUnpackedSize: "number",
+    npmFileCount: "number",
 });
 export const PackageVtAnalysisSchema = type({
     status: "string",
@@ -67,6 +127,8 @@ export const PackageLlmAnalysisSchema = type({
     dimensions: PackageLlmAnalysisDimensionSchema.array().optional(),
     guidance: "string?",
     findings: "string?",
+    agenticRiskFindings: "unknown[]?",
+    riskSummary: "unknown?",
     model: "string?",
     checkedAt: "number",
 });
@@ -107,11 +169,13 @@ export const PackagePublishRequestSchema = type({
     family: PackageFamilySchema,
     version: "string",
     changelog: "string",
+    clawScanNote: "string?",
     manualOverrideReason: "string?",
     channel: PackageChannelSchema.optional(),
     tags: "string[]?",
     source: PublishSourceSchema.optional(),
     bundle: BundlePublishMetadataSchema.optional(),
+    artifact: PackagePublishArtifactSchema.optional(),
     files: CliPublishFileSchema.array(),
 });
 export const PackageListItemSchema = type({
@@ -157,6 +221,7 @@ export const ApiV1PackageResponseSchema = type({
         compatibility: PackageCompatibilitySchema.or("null").optional(),
         capabilities: PackageCapabilitySummarySchema.or("null").optional(),
         verification: PackageVerificationSummarySchema.or("null").optional(),
+        artifact: PackageArtifactSummarySchema.or("null").optional(),
         stats: PackageStatsSchema.optional(),
     }).or("null"),
     owner: type({
@@ -189,11 +254,345 @@ export const ApiV1PackageVersionResponseSchema = type({
         compatibility: PackageCompatibilitySchema.or("null").optional(),
         capabilities: PackageCapabilitySummarySchema.or("null").optional(),
         verification: PackageVerificationSummarySchema.or("null").optional(),
-        sha256hash: "string?",
+        artifact: PackageArtifactSummarySchema.or("null").optional(),
+        sha256hash: "string|null?",
         vtAnalysis: PackageVtAnalysisSchema.or("null").optional(),
         llmAnalysis: PackageLlmAnalysisSchema.or("null").optional(),
+        clawScanNote: "string|null?",
+        clawScanNoteUpdatedAt: "number|null?",
         staticScan: PackageStaticScanSchema.or("null").optional(),
     }).or("null"),
+});
+export const ApiV1PackageArtifactResponseSchema = type({
+    package: type({
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+    }),
+    version: "string",
+    artifact: type({
+        kind: PackageArtifactKindSchema,
+        sha256: "string?",
+        size: "number?",
+        format: "string?",
+        npmIntegrity: "string?",
+        npmShasum: "string?",
+        npmTarballName: "string?",
+        npmUnpackedSize: "number?",
+        npmFileCount: "number?",
+        downloadUrl: "string",
+        tarballUrl: "string?",
+        legacyDownloadUrl: "string?",
+        source: '"clawhub"?',
+        artifactKind: PackageArtifactKindSchema.optional(),
+        artifactSha256: "string?",
+        packageName: "string?",
+        version: "string?",
+    }),
+});
+export const ApiV1PackageSecurityResponseSchema = type({
+    package: type({
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+    }),
+    release: type({
+        releaseId: "string",
+        version: "string",
+        artifactKind: PackageArtifactKindSchema.or("null").optional(),
+        artifactSha256: "string?",
+        npmIntegrity: "string?",
+        npmShasum: "string?",
+        npmTarballName: "string?",
+        createdAt: "number",
+    }),
+    trust: type({
+        scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"',
+        moderationState: PackageReleaseModerationStateSchema.or("null").optional(),
+        blockedFromDownload: "boolean",
+        reasons: "string[]",
+        pending: "boolean",
+        stale: "boolean",
+    }),
+});
+export const PackageReleaseModerationRequestSchema = type({
+    state: PackageReleaseModerationStateSchema,
+    reason: "string",
+});
+export const PackageReportRequestSchema = type({
+    reason: "string",
+    version: "string?",
+});
+export const ApiV1PackageReportResponseSchema = type({
+    ok: "true",
+    reported: "boolean",
+    alreadyReported: "boolean",
+    packageId: "string",
+    releaseId: "string|null",
+    reportCount: "number",
+});
+export const PackageReportTriageRequestSchema = type({
+    status: PackageReportStatusSchema,
+    note: "string?",
+    finalAction: PackageReportFinalActionSchema.optional(),
+});
+export const PackageAppealRequestSchema = type({
+    version: "string",
+    message: "string",
+});
+export const ApiV1PackageAppealResponseSchema = type({
+    ok: "true",
+    submitted: "boolean",
+    alreadyOpen: "boolean",
+    appealId: "string",
+    packageId: "string",
+    releaseId: "string",
+    status: PackageAppealStatusSchema,
+});
+export const PackageAppealResolveRequestSchema = type({
+    status: PackageAppealStatusSchema,
+    note: "string?",
+    finalAction: PackageAppealFinalActionSchema.optional(),
+});
+export const ApiV1PackageAppealListResponseSchema = type({
+    items: type({
+        appealId: "string",
+        packageId: "string",
+        releaseId: "string",
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+        version: "string",
+        message: "string",
+        status: PackageAppealStatusSchema,
+        createdAt: "number",
+        submitter: type({
+            userId: "string",
+            handle: "string|null?",
+            displayName: "string|null?",
+        }),
+        resolvedAt: "number|null?",
+        resolvedBy: "string|null?",
+        resolutionNote: "string|null?",
+        actionTaken: PackageAppealFinalActionSchema.or("null").optional(),
+    }).array(),
+    nextCursor: "string|null",
+    done: "boolean",
+});
+export const ApiV1PackageAppealResolveResponseSchema = type({
+    ok: "true",
+    appealId: "string",
+    packageId: "string",
+    releaseId: "string",
+    status: PackageAppealStatusSchema,
+    actionTaken: PackageAppealFinalActionSchema.optional(),
+});
+export const ApiV1PackageReportListResponseSchema = type({
+    items: type({
+        reportId: "string",
+        packageId: "string",
+        releaseId: "string|null?",
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+        version: "string|null?",
+        reason: "string|null?",
+        status: PackageReportStatusSchema,
+        createdAt: "number",
+        reporter: type({
+            userId: "string",
+            handle: "string|null?",
+            displayName: "string|null?",
+        }),
+        triagedAt: "number|null?",
+        triagedBy: "string|null?",
+        triageNote: "string|null?",
+        actionTaken: PackageReportFinalActionSchema.or("null").optional(),
+    }).array(),
+    nextCursor: "string|null",
+    done: "boolean",
+});
+export const ApiV1PackageReportTriageResponseSchema = type({
+    ok: "true",
+    reportId: "string",
+    packageId: "string",
+    status: PackageReportStatusSchema,
+    reportCount: "number",
+    actionTaken: PackageReportFinalActionSchema.optional(),
+});
+export const ApiV1PackageModerationStatusResponseSchema = type({
+    package: type({
+        packageId: "string",
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+        channel: PackageChannelSchema,
+        isOfficial: "boolean",
+        reportCount: "number",
+        lastReportedAt: "number|null?",
+        scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"?',
+    }),
+    latestRelease: type({
+        releaseId: "string",
+        version: "string",
+        artifactKind: PackageArtifactKindSchema.or("null").optional(),
+        scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"',
+        moderationState: PackageReleaseModerationStateSchema.or("null").optional(),
+        moderationReason: "string|null?",
+        blockedFromDownload: "boolean",
+        reasons: "string[]",
+        createdAt: "number",
+    }).or("null"),
+});
+export const PackageArtifactBackfillRequestSchema = type({
+    cursor: "string|null?",
+    batchSize: "number?",
+    dryRun: "boolean?",
+});
+export const ApiV1PackageArtifactBackfillResponseSchema = type({
+    ok: "true",
+    scanned: "number",
+    updated: "number",
+    nextCursor: "string|null",
+    done: "boolean",
+    dryRun: "boolean",
+});
+export const PackageReadinessCheckSchema = type({
+    id: "string",
+    label: "string",
+    status: '"pass"|"warn"|"fail"',
+    message: "string",
+});
+export const ApiV1PackageReadinessResponseSchema = type({
+    package: type({
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+        isOfficial: "boolean",
+        latestVersion: "string|null?",
+    }),
+    ready: "boolean",
+    checks: PackageReadinessCheckSchema.array(),
+    blockers: "string[]",
+});
+export const PackageTransferRequestSchema = type({
+    toOwner: "string",
+    reason: "string?",
+});
+export const ApiV1PackageTransferResponseSchema = type({
+    ok: "true",
+    packageId: "string",
+    name: "string",
+    ownerUserId: "string",
+    ownerPublisherId: "string?",
+    channel: PackageChannelSchema,
+    isOfficial: "boolean",
+});
+export const PackageRepairNameRequestSchema = type({
+    nextName: "string",
+    retireTarget: "boolean?",
+    owner: "string?",
+    reason: "string",
+    dryRun: "boolean?",
+});
+export const PackageRepairNamePackageSchema = type({
+    packageId: "string",
+    name: "string",
+    runtimeId: "string|null?",
+    ownerUserId: "string",
+    ownerPublisherId: "string|null?",
+    channel: PackageChannelSchema,
+    softDeletedAt: "number|null?",
+});
+export const PackageRepairNameOperationSchema = type({
+    action: '"retire-target"|"rename-source"|"transfer-owner"',
+    packageId: "string?",
+    from: "string?",
+    to: "string?",
+    owner: "string?",
+});
+export const ApiV1PackageRepairNameResponseSchema = type({
+    ok: "true",
+    dryRun: "boolean",
+    source: PackageRepairNamePackageSchema,
+    target: PackageRepairNamePackageSchema.or("null"),
+    retiredName: "string|null?",
+    operations: PackageRepairNameOperationSchema.array(),
+});
+export const PackageOfficialMigrationUpsertRequestSchema = type({
+    bundledPluginId: "string",
+    packageName: "string",
+    owner: "string?",
+    sourceRepo: "string?",
+    sourcePath: "string?",
+    sourceCommit: "string?",
+    phase: PackageOfficialMigrationPhaseSchema.optional(),
+    blockers: "string[]?",
+    hostTargetsComplete: "boolean?",
+    scanClean: "boolean?",
+    moderationApproved: "boolean?",
+    runtimeBundlesReady: "boolean?",
+    notes: "string?",
+});
+export const PackageOfficialMigrationItemSchema = type({
+    migrationId: "string",
+    bundledPluginId: "string",
+    packageName: "string",
+    packageId: "string|null?",
+    owner: "string|null?",
+    sourceRepo: "string|null?",
+    sourcePath: "string|null?",
+    sourceCommit: "string|null?",
+    phase: PackageOfficialMigrationPhaseSchema,
+    blockers: "string[]",
+    hostTargetsComplete: "boolean",
+    scanClean: "boolean",
+    moderationApproved: "boolean",
+    runtimeBundlesReady: "boolean",
+    notes: "string|null?",
+    createdAt: "number",
+    updatedAt: "number",
+});
+export const ApiV1PackageOfficialMigrationListResponseSchema = type({
+    items: PackageOfficialMigrationItemSchema.array(),
+    nextCursor: "string|null",
+    done: "boolean",
+});
+export const ApiV1PackageOfficialMigrationResponseSchema = type({
+    ok: "true",
+    migration: PackageOfficialMigrationItemSchema,
+});
+export const PackageModerationQueueStatusSchema = type('"open"|"blocked"|"manual"|"all"');
+export const ApiV1PackageModerationQueueResponseSchema = type({
+    items: type({
+        packageId: "string",
+        releaseId: "string",
+        name: "string",
+        displayName: "string",
+        family: PackageFamilySchema,
+        channel: PackageChannelSchema,
+        isOfficial: "boolean",
+        version: "string",
+        createdAt: "number",
+        artifactKind: PackageArtifactKindSchema.or("null").optional(),
+        scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"',
+        moderationState: PackageReleaseModerationStateSchema.or("null").optional(),
+        moderationReason: "string|null?",
+        sourceRepo: "string|null?",
+        sourceCommit: "string|null?",
+        reportCount: "number",
+        lastReportedAt: "number|null?",
+        reasons: "string[]",
+    }).array(),
+    nextCursor: "string|null",
+    done: "boolean",
+});
+export const ApiV1PackageReleaseModerationResponseSchema = type({
+    ok: "true",
+    packageId: "string",
+    releaseId: "string",
+    state: PackageReleaseModerationStateSchema,
+    scanStatus: '"clean"|"malicious"',
 });
 export const ApiV1PackagePublishResponseSchema = type({
     ok: "true",

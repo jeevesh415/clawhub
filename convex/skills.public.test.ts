@@ -14,7 +14,13 @@ vi.mock("./lib/badges", () => ({
 
 const { getAuthUserId } = await import("@convex-dev/auth/server");
 const { getSkillBadgeMap } = await import("./lib/badges");
-const { getBySlug } = await import("./skills");
+const {
+  getBySlug,
+  listSkillReportsInternal,
+  resolveSkillAppealForUserInternal,
+  submitSkillAppealForUserInternal,
+  triageSkillReportForUserInternal,
+} = await import("./skills");
 
 type WrappedHandler<TArgs, TResult = unknown> = {
   _handler: (ctx: unknown, args: TArgs) => Promise<TResult>;
@@ -26,6 +32,10 @@ const getBySlugHandler = (
       slug: string;
     },
     {
+      skill?: {
+        canonicalSkillId?: string;
+        forkOf?: unknown;
+      };
       owner?: {
         _id: string;
         _creationTime: number;
@@ -41,7 +51,101 @@ const getBySlugHandler = (
           contentType?: string;
         }>;
       } | null;
+      forkOf?: {
+        skill: {
+          slug: string;
+          displayName: string;
+        };
+        owner: {
+          handle: string | null;
+          userId: string | null;
+        };
+      } | null;
+      canonical?: {
+        skill: {
+          slug: string;
+          displayName: string;
+        };
+        owner: {
+          handle: string | null;
+          userId: string | null;
+        };
+      } | null;
     } | null
+  >
+)._handler;
+
+const submitSkillAppealForUserInternalHandler = (
+  submitSkillAppealForUserInternal as unknown as WrappedHandler<
+    {
+      actorUserId: string;
+      slug: string;
+      version?: string;
+      message: string;
+    },
+    {
+      ok: true;
+      submitted: boolean;
+      alreadyOpen: boolean;
+      appealId: string;
+      skillId: string;
+      status: string;
+    }
+  >
+)._handler;
+
+const listSkillReportsInternalHandler = (
+  listSkillReportsInternal as unknown as WrappedHandler<
+    {
+      actorUserId: string;
+      cursor?: string | null;
+      limit?: number;
+      status?: "open" | "confirmed" | "dismissed" | "all";
+    },
+    {
+      items: Array<{ reportId: string; slug: string; status: string }>;
+      nextCursor: string | null;
+      done: boolean;
+    }
+  >
+)._handler;
+
+const triageSkillReportForUserInternalHandler = (
+  triageSkillReportForUserInternal as unknown as WrappedHandler<
+    {
+      actorUserId: string;
+      reportId: string;
+      status: "open" | "confirmed" | "dismissed";
+      note?: string;
+      finalAction?: "none" | "hide";
+    },
+    {
+      ok: true;
+      reportId: string;
+      skillId: string;
+      status: string;
+      reportCount: number;
+      actionTaken?: string;
+    }
+  >
+)._handler;
+
+const resolveSkillAppealForUserInternalHandler = (
+  resolveSkillAppealForUserInternal as unknown as WrappedHandler<
+    {
+      actorUserId: string;
+      appealId: string;
+      status: "open" | "accepted" | "rejected";
+      note?: string;
+      finalAction?: "none" | "restore";
+    },
+    {
+      ok: true;
+      appealId: string;
+      skillId: string;
+      status: string;
+      actionTaken?: string;
+    }
   >
 )._handler;
 
@@ -49,6 +153,8 @@ function makeCtx(args: {
   skill: Record<string, unknown> | null;
   owner: Record<string, unknown> | null;
   latestVersion?: Record<string, unknown> | null;
+  skillsById?: Record<string, Record<string, unknown>>;
+  ownersById?: Record<string, Record<string, unknown>>;
 }) {
   const unique = vi.fn().mockResolvedValue(args.skill);
   const withIndex = vi.fn(() => ({ unique }));
@@ -58,11 +164,55 @@ function makeCtx(args: {
   });
   const get = vi.fn(async (id: string) => {
     if (!args.skill) return null;
+    if (id === args.skill._id) return args.skill;
+    if (args.skillsById?.[id]) return args.skillsById[id];
+    if (args.ownersById?.[id]) return args.ownersById[id];
     if (id === args.skill.ownerUserId) return args.owner;
     if (id === args.skill.latestVersionId) return args.latestVersion ?? null;
     return null;
   });
   return { db: { query, get } } as never;
+}
+
+function makeOwner(id: string, handle: string, overrides: Record<string, unknown> = {}) {
+  return {
+    _id: id,
+    _creationTime: 1,
+    handle,
+    name: handle,
+    displayName: handle,
+    image: null,
+    ...overrides,
+  };
+}
+
+function makeSkill(overrides: Record<string, unknown> = {}) {
+  return {
+    _id: "skills:1",
+    _creationTime: 1,
+    slug: "demo",
+    displayName: "Demo",
+    summary: "Public demo skill",
+    ownerUserId: "users:1",
+    canonicalSkillId: undefined,
+    forkOf: undefined,
+    latestVersionId: null,
+    tags: {},
+    stats: {
+      downloads: 10,
+      installsCurrent: 2,
+      installsAllTime: 5,
+      stars: 3,
+      versions: 1,
+      comments: 0,
+    },
+    createdAt: 1,
+    updatedAt: 2,
+    moderationStatus: "active",
+    moderationFlags: undefined,
+    softDeletedAt: undefined,
+    ...overrides,
+  };
 }
 
 describe("skills.getBySlug", () => {
@@ -178,6 +328,116 @@ describe("skills.getBySlug", () => {
     expect(result).toBeNull();
   });
 
+  it("omits duplicate references to nonpublic skills", async () => {
+    const ctx = makeCtx({
+      skill: makeSkill({
+        canonicalSkillId: "skills:hidden-canonical",
+        forkOf: {
+          skillId: "skills:deleted-fork",
+          kind: "duplicate",
+          version: "1.0.0",
+        },
+      }),
+      owner: makeOwner("users:1", "demo-owner", { displayName: "Demo Owner" }),
+      skillsById: {
+        "skills:deleted-fork": makeSkill({
+          _id: "skills:deleted-fork",
+          _creationTime: 2,
+          slug: "deleted-fork",
+          displayName: "Deleted Fork",
+          summary: "Deleted duplicate source",
+          ownerUserId: "users:fork-owner",
+          softDeletedAt: 123,
+        }),
+        "skills:hidden-canonical": makeSkill({
+          _id: "skills:hidden-canonical",
+          _creationTime: 3,
+          slug: "hidden-canonical",
+          displayName: "Hidden Canonical",
+          summary: "Hidden canonical source",
+          ownerUserId: "users:canonical-owner",
+          moderationStatus: "hidden",
+        }),
+      },
+    });
+
+    const result = await getBySlugHandler(ctx, { slug: "demo" } as never);
+
+    expect(result?.forkOf).toBeNull();
+    expect(result?.canonical).toBeNull();
+    expect(result?.skill?.forkOf).toBeUndefined();
+    expect(result?.skill?.canonicalSkillId).toBeUndefined();
+  });
+
+  it("keeps duplicate references to public skills", async () => {
+    const ctx = makeCtx({
+      skill: makeSkill({
+        canonicalSkillId: "skills:canonical",
+        forkOf: {
+          skillId: "skills:fork",
+          kind: "duplicate",
+          version: "1.0.0",
+        },
+      }),
+      owner: makeOwner("users:1", "demo-owner", { displayName: "Demo Owner" }),
+      skillsById: {
+        "skills:fork": makeSkill({
+          _id: "skills:fork",
+          _creationTime: 2,
+          slug: "fork-source",
+          displayName: "Fork Source",
+          summary: "Public duplicate source",
+          ownerUserId: "users:fork-owner",
+        }),
+        "skills:canonical": makeSkill({
+          _id: "skills:canonical",
+          _creationTime: 3,
+          slug: "canonical-source",
+          displayName: "Canonical Source",
+          summary: "Public canonical source",
+          ownerUserId: "users:canonical-owner",
+        }),
+      },
+      ownersById: {
+        "users:fork-owner": makeOwner("users:fork-owner", "fork-owner", {
+          _creationTime: 2,
+          displayName: "Fork Owner",
+        }),
+        "users:canonical-owner": makeOwner("users:canonical-owner", "canonical-owner", {
+          _creationTime: 3,
+          displayName: "Canonical Owner",
+        }),
+      },
+    });
+
+    const result = await getBySlugHandler(ctx, { slug: "demo" } as never);
+
+    expect(result?.forkOf).toMatchObject({
+      kind: "duplicate",
+      version: "1.0.0",
+      skill: {
+        slug: "fork-source",
+        displayName: "Fork Source",
+      },
+      owner: {
+        handle: "fork-owner",
+        userId: "users:fork-owner",
+      },
+    });
+    expect(result?.canonical).toMatchObject({
+      skill: {
+        slug: "canonical-source",
+        displayName: "Canonical Source",
+      },
+      owner: {
+        handle: "canonical-owner",
+        userId: "users:canonical-owner",
+      },
+    });
+    expect(result?.skill?.forkOf).toBeDefined();
+    expect(result?.skill?.canonicalSkillId).toBe("skills:canonical");
+  });
+
   it("normalizes misleading file MIME types in public version metadata", async () => {
     const ctx = makeCtx({
       skill: {
@@ -242,5 +502,303 @@ describe("skills.getBySlug", () => {
         contentType: "application/typescript",
       }),
     ]);
+  });
+});
+
+describe("skill artifact moderation", () => {
+  it("lets owners appeal soft-deleted moderated skills", async () => {
+    const skill = makeSkill({
+      softDeletedAt: 123,
+      moderationStatus: "hidden",
+      moderationReason: "scanner.llm.suspicious",
+      latestVersionId: undefined,
+    });
+    const insert = vi.fn(async (table: string) => {
+      if (table === "skillAppeals") return "skillAppeals:1";
+      if (table === "skillModerationEventLogs") return "skillModerationEventLogs:1";
+      if (table === "auditLogs") return "auditLogs:1";
+      throw new Error(`Unexpected insert table: ${table}`);
+    });
+
+    const result = await submitSkillAppealForUserInternalHandler(
+      {
+        db: {
+          get: vi.fn(async (id: string) => {
+            if (id === "users:1") return makeOwner("users:1", "owner");
+            return null;
+          }),
+          query: vi.fn((table: string) => {
+            if (table === "skills") {
+              return {
+                withIndex: vi.fn(() => ({
+                  unique: vi.fn().mockResolvedValue(skill),
+                })),
+              };
+            }
+            if (table === "skillAppeals") {
+              return {
+                withIndex: vi.fn(() => ({
+                  order: vi.fn(() => ({
+                    first: vi.fn().mockResolvedValue(null),
+                  })),
+                })),
+              };
+            }
+            throw new Error(`Unexpected query table: ${table}`);
+          }),
+          insert,
+          patch: vi.fn(),
+          replace: vi.fn(),
+          delete: vi.fn(),
+          normalizeId: vi.fn(),
+        },
+      } as never,
+      {
+        actorUserId: "users:1",
+        slug: "demo",
+        message: "please review",
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      submitted: true,
+      appealId: "skillAppeals:1",
+      skillId: "skills:1",
+      status: "open",
+    });
+    expect(insert).toHaveBeenCalledWith("skillAppeals", {
+      skillId: "skills:1",
+      userId: "users:1",
+      message: "please review",
+      status: "open",
+      createdAt: expect.any(Number),
+    });
+    expect(insert).toHaveBeenCalledWith(
+      "skillModerationEventLogs",
+      expect.objectContaining({
+        kind: "appeal",
+        appealId: "skillAppeals:1",
+        action: "skill.appeal.submit",
+      }),
+    );
+  });
+
+  it("keeps hidden skill reports visible in the moderator queue", async () => {
+    const result = await listSkillReportsInternalHandler(
+      {
+        db: {
+          get: vi.fn(async (id: string) => {
+            if (id === "users:moderator") return { _id: id, role: "moderator" };
+            if (id === "skills:hidden") {
+              return makeSkill({
+                _id: "skills:hidden",
+                slug: "hidden-demo",
+                softDeletedAt: 123,
+                moderationStatus: "hidden",
+              });
+            }
+            if (id === "users:reporter") return makeOwner("users:reporter", "reporter");
+            return null;
+          }),
+          query: vi.fn((table: string) => {
+            if (table === "skillReports") {
+              return {
+                withIndex: vi.fn(() => ({
+                  order: vi.fn(() => ({
+                    paginate: vi.fn().mockResolvedValue({
+                      page: [
+                        {
+                          _id: "skillReports:1",
+                          skillId: "skills:hidden",
+                          userId: "users:reporter",
+                          reason: "suspicious",
+                          status: "open",
+                          createdAt: 1,
+                        },
+                      ],
+                      isDone: true,
+                      continueCursor: "",
+                    }),
+                  })),
+                })),
+              };
+            }
+            throw new Error(`Unexpected query table: ${table}`);
+          }),
+        },
+      } as never,
+      {
+        actorUserId: "users:moderator",
+        status: "open",
+      },
+    );
+
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        reportId: "skillReports:1",
+        slug: "hidden-demo",
+        status: "open",
+      }),
+    ]);
+  });
+
+  it("can hide a skill while triaging a valid report", async () => {
+    const skill = makeSkill({ reportCount: 1 });
+    const patch = vi.fn();
+    const insert = vi.fn(async (table: string) => `${table}:1`);
+
+    const result = await triageSkillReportForUserInternalHandler(
+      {
+        db: {
+          get: vi.fn(async (id: string) => {
+            if (id === "users:moderator") return { _id: id, role: "moderator" };
+            if (id === "skillReports:1") {
+              return {
+                _id: id,
+                skillId: "skills:1",
+                userId: "users:reporter",
+                status: "open",
+                createdAt: 1,
+              };
+            }
+            if (id === "skills:1") return skill;
+            return null;
+          }),
+          patch,
+          insert,
+          replace: vi.fn(),
+          delete: vi.fn(),
+          normalizeId: vi.fn(),
+          query: vi.fn((table: string) => {
+            if (table === "skillEmbeddings") {
+              return { withIndex: vi.fn(() => ({ collect: vi.fn().mockResolvedValue([]) })) };
+            }
+            if (table === "globalStats") {
+              return { withIndex: vi.fn(() => ({ unique: vi.fn().mockResolvedValue(null) })) };
+            }
+            throw new Error(`Unexpected query table: ${table}`);
+          }),
+        },
+      } as never,
+      {
+        actorUserId: "users:moderator",
+        reportId: "skillReports:1",
+        status: "confirmed",
+        note: "confirmed malicious behavior",
+        finalAction: "hide",
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: "confirmed",
+      actionTaken: "hide",
+    });
+    expect(patch).toHaveBeenCalledWith("skillReports:1", {
+      status: "confirmed",
+      triagedAt: expect.any(Number),
+      triagedBy: "users:moderator",
+      triageNote: "confirmed malicious behavior",
+      actionTaken: "hide",
+    });
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        softDeletedAt: expect.any(Number),
+        moderationStatus: "hidden",
+        moderationReason: "manual.report",
+      }),
+    );
+    expect(insert).toHaveBeenCalledWith(
+      "auditLogs",
+      expect.objectContaining({
+        action: "skill.report.final_action",
+        targetType: "skill",
+      }),
+    );
+  });
+
+  it("can restore a skill while accepting an appeal", async () => {
+    const skill = makeSkill({
+      softDeletedAt: 123,
+      moderationStatus: "hidden",
+      moderationReason: "scanner.llm.suspicious",
+      moderationFlags: ["blocked.malware"],
+    });
+    const patch = vi.fn();
+    const insert = vi.fn(async (table: string) => `${table}:1`);
+
+    const result = await resolveSkillAppealForUserInternalHandler(
+      {
+        db: {
+          get: vi.fn(async (id: string) => {
+            if (id === "users:moderator") return { _id: id, role: "moderator" };
+            if (id === "skillAppeals:1") {
+              return {
+                _id: id,
+                skillId: "skills:1",
+                userId: "users:owner",
+                message: "false positive",
+                status: "open",
+                createdAt: 1,
+              };
+            }
+            if (id === "skills:1") return skill;
+            return null;
+          }),
+          patch,
+          insert,
+          replace: vi.fn(),
+          delete: vi.fn(),
+          normalizeId: vi.fn(),
+          query: vi.fn((table: string) => {
+            if (table === "skillEmbeddings") {
+              return { withIndex: vi.fn(() => ({ collect: vi.fn().mockResolvedValue([]) })) };
+            }
+            if (table === "globalStats") {
+              return { withIndex: vi.fn(() => ({ unique: vi.fn().mockResolvedValue(null) })) };
+            }
+            throw new Error(`Unexpected query table: ${table}`);
+          }),
+        },
+      } as never,
+      {
+        actorUserId: "users:moderator",
+        appealId: "skillAppeals:1",
+        status: "accepted",
+        note: "false positive confirmed",
+        finalAction: "restore",
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: "accepted",
+      actionTaken: "restore",
+    });
+    expect(patch).toHaveBeenCalledWith("skillAppeals:1", {
+      status: "accepted",
+      resolvedAt: expect.any(Number),
+      resolvedBy: "users:moderator",
+      resolutionNote: "false positive confirmed",
+      actionTaken: "restore",
+    });
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        softDeletedAt: undefined,
+        moderationStatus: "active",
+        moderationReason: "manual.override.clean",
+        moderationFlags: undefined,
+      }),
+    );
+    expect(insert).toHaveBeenCalledWith(
+      "auditLogs",
+      expect.objectContaining({
+        action: "skill.appeal.final_action",
+        targetType: "skill",
+      }),
+    );
   });
 });

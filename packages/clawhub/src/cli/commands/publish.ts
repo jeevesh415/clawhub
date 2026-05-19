@@ -1,8 +1,12 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import semver from "semver";
 import { apiRequestForm } from "../../http.js";
-import { ApiRoutes, ApiV1PublishResponseSchema } from "../../schema/index.js";
+import {
+  ApiRoutes,
+  ApiV1PublishResponseSchema,
+  normalizeClawScanNote,
+} from "../../schema/index.js";
 import { listTextFiles } from "../../skills.js";
 import { requireAuthToken } from "../authToken.js";
 import { getRegistry } from "../registry.js";
@@ -16,10 +20,13 @@ export async function cmdPublish(
   options: {
     slug?: string;
     name?: string;
+    owner?: string;
     version?: string;
     changelog?: string;
     tags?: string;
     forkOf?: string;
+    clawscanNote?: string;
+    migrateOwner?: boolean;
   },
 ) {
   const folder = folderArg ? resolve(opts.workdir, folderArg) : null;
@@ -35,8 +42,15 @@ export async function cmdPublish(
 
   const slug = options.slug ?? sanitizeSlug(basename(folder));
   const displayName = options.name ?? titleCase(basename(folder));
+  const ownerHandle = options.owner?.trim().replace(/^@+/, "");
   const version = options.version;
   const changelog = options.changelog ?? "";
+  let clawScanNote: string | undefined;
+  try {
+    clawScanNote = normalizeClawScanNote(options.clawscanNote);
+  } catch (error) {
+    fail(formatError(error));
+  }
   const tagsValue = options.tags ?? "latest";
   const tags = tagsValue
     .split(",")
@@ -52,7 +66,7 @@ export async function cmdPublish(
 
   const spinner = createSpinner(`Preparing ${slug}@${version}`);
   try {
-    const filesOnDisk = await listTextFiles(folder);
+    const filesOnDisk = await ensureRootManifestFile(folder, await listTextFiles(folder));
     if (filesOnDisk.length === 0) fail("No files found");
     if (
       !filesOnDisk.some((file) => {
@@ -69,8 +83,11 @@ export async function cmdPublish(
       JSON.stringify({
         slug,
         displayName,
+        ...(ownerHandle ? { ownerHandle } : {}),
+        ...(options.migrateOwner ? { migrateOwner: true } : {}),
         version,
         changelog,
+        ...(clawScanNote ? { clawScanNote } : {}),
         acceptLicenseTerms: true,
         tags,
         ...(forkOf ? { forkOf } : {}),
@@ -99,21 +116,53 @@ export async function cmdPublish(
   }
 }
 
+async function ensureRootManifestFile(
+  folder: string,
+  files: Awaited<ReturnType<typeof listTextFiles>>,
+) {
+  if (
+    files.some((file) => {
+      const lower = file.relPath.toLowerCase();
+      return lower === "skill.md" || lower === "skills.md";
+    })
+  ) {
+    return files;
+  }
+
+  const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
+  const manifest = entries.find((entry) => {
+    const lower = entry.name.toLowerCase();
+    return entry.isFile() && (lower === "skill.md" || lower === "skills.md");
+  });
+  if (!manifest) return files;
+
+  return [
+    ...files,
+    {
+      relPath: manifest.name,
+      bytes: new Uint8Array(await readFile(join(folder, manifest.name))),
+      contentType: "text/markdown",
+    },
+  ];
+}
+
 async function looksLikePluginFolder(folder: string) {
   const checks = [
     join(folder, "openclaw.plugin.json"),
-    join(folder, "openclaw.bundle.json"),
     join(folder, "package.json"),
+    join(folder, ".codex-plugin", "plugin.json"),
+    join(folder, ".claude-plugin", "plugin.json"),
+    join(folder, ".cursor-plugin", "plugin.json"),
   ];
   const stats = await Promise.all(checks.map((candidate) => stat(candidate).catch(() => null)));
-  if (stats[0]?.isFile() || stats[1]?.isFile()) {
+  if (stats[0]?.isFile() || stats[2]?.isFile() || stats[3]?.isFile() || stats[4]?.isFile()) {
     return true;
   }
-  if (!stats[2]?.isFile()) {
+  if (!stats[1]?.isFile()) {
     return false;
   }
   try {
-    const raw = JSON.parse(await readFile(checks[2], "utf8")) as { openclaw?: unknown };
+    const raw = JSON.parse(await readFile(checks[1], "utf8")) as { openclaw?: unknown };
     return Boolean(
       raw && typeof raw === "object" && raw.openclaw && typeof raw.openclaw === "object",
     );

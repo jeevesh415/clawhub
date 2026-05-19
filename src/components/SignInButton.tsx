@@ -10,16 +10,14 @@ type SignInButtonProps = Omit<ButtonProps, "onClick" | "type"> & {
   redirectTo?: string;
 };
 
-export function SignInButton({
-  redirectTo,
-  children = "Sign in with GitHub",
-  ...props
-}: SignInButtonProps) {
+export function SignInButton({ redirectTo, children = "Sign In", ...props }: SignInButtonProps) {
   const { signIn } = useAuthActions();
 
   return (
     <Button
+      {...props}
       type="button"
+      variant="primary"
       onClick={() => {
         clearAuthError();
         const next = redirectTo ?? getCurrentRelativeUrl();
@@ -30,12 +28,9 @@ export function SignInButton({
             }
           })
           .catch((error) => {
-            setAuthError(
-              getUserFacingAuthError(error, "Sign in failed. Please try again."),
-            );
+            setAuthError(getUserFacingAuthError(error, "Sign in failed. Please try again."));
           });
       }}
-      {...props}
     >
       {children}
     </Button>

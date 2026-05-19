@@ -1,32 +1,36 @@
 import { expect, test } from "@playwright/test";
-import { expectHealthyPage, trackRuntimeErrors } from "./helpers/runtimeErrors";
+import { expectHealthyPage, trackRuntimeErrors, waitForHydration } from "./helpers/runtimeErrors";
 
-test("home install switcher and browse CTA work", async ({ page }) => {
+test("home search and browse entry points work", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: /clawhub, the skill dock/i })).toBeVisible();
-  await expect(page.getByText("npx clawhub@latest install sonoscli")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Equip.*Install/i })).toBeVisible();
+  await expect(page.getByText("Tools built by thousands, ready in one search.")).toBeVisible();
+  await waitForHydration(page);
+  await expect(page.getByRole("button", { name: "Search" })).toBeEnabled();
 
-  await page.getByRole("tab", { name: "pnpm" }).click();
-  await expect(page.getByText("pnpm dlx clawhub@latest install sonoscli")).toBeVisible();
+  await page.getByPlaceholder("What are you looking for?").fill("gifgrep");
+  await page.getByPlaceholder("What are you looking for?").press("Enter");
+  await expect(page).toHaveURL(/\/search\?q=gifgrep/);
+  await expect(page.getByRole("heading", { name: /Search results for "gifgrep"/ })).toBeVisible();
 
-  await page.getByRole("tab", { name: "bun" }).click();
-  await expect(page.getByText("bunx clawhub@latest install sonoscli")).toBeVisible();
-
-  await page.getByRole("link", { name: "Browse skills" }).click();
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await waitForHydration(page);
+  await expect(page.getByRole("button", { name: "Search" })).toBeEnabled();
+  await page.getByRole("link", { name: /Skills Agent skill bundles/ }).click();
   await expect(page).toHaveURL(/\/skills/);
   await expect(page.getByRole("heading", { name: /^Skills/ })).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
-test("legacy search route redirects into skills browse", async ({ page }) => {
+test("search route preserves query in unified search", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 
-  await page.goto("/search?q=gifgrep&nonSuspicious=1", { waitUntil: "domcontentloaded" });
-  await expect(page).toHaveURL(/\/skills\?/);
+  await page.goto("/search?q=gifgrep", { waitUntil: "domcontentloaded" });
+  await expect(page).toHaveURL(/\/search\?/);
   await expect(page).toHaveURL(/q=gifgrep/);
-  await expect(page.locator('input[placeholder="Filter by name, slug, or summary…"]')).toHaveValue(
+  await expect(page.locator('input[placeholder="Search skills and plugins..."]')).toHaveValue(
     "gifgrep",
   );
   await expectHealthyPage(page, errors);

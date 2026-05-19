@@ -226,9 +226,7 @@ export function ImportGitHub() {
             title={isLoading ? "Loading..." : "Sign in to import and publish skills"}
             description="You need to be signed in to import skills from GitHub."
           >
-            {!isLoading ? (
-              <SignInButton variant="outline">Sign in with GitHub</SignInButton>
-            ) : null}
+            {!isLoading ? <SignInButton /> : null}
           </EmptyState>
         </Container>
       </main>
@@ -253,7 +251,7 @@ export function ImportGitHub() {
               <Badge variant="accent" className="mt-3 w-fit">
                 Skill-only import. Plugins are not supported here. Use{" "}
                 <Link
-                  to="/publish-plugin"
+                  to="/plugins/publish"
                   search={{
                     ownerHandle: undefined,
                     name: undefined,
@@ -463,7 +461,7 @@ export function ImportGitHub() {
                   >
                     <input
                       type="checkbox"
-                      checked={Boolean(selected[file.path])}
+                      checked={selected[file.path]}
                       onChange={() =>
                         setSelected((prev) => ({ ...prev, [file.path]: !prev[file.path] }))
                       }

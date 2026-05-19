@@ -12,6 +12,7 @@ import type { ActionCtx } from "./_generated/server";
 import { httpAction } from "./functions";
 import { requireApiTokenUser } from "./lib/apiTokenAuth";
 import { corsHeaders, mergeHeaders } from "./lib/httpHeaders";
+import { applyRateLimit } from "./lib/httpRateLimit";
 import { parseBooleanQueryParam, resolveBooleanQueryParam } from "./lib/httpUtils";
 import { publishVersionForUser } from "./skills";
 
@@ -138,8 +139,8 @@ async function cliWhoamiHandler(ctx: ActionCtx, request: Request) {
         image: user.image ?? null,
       },
     });
-  } catch {
-    return text("Unauthorized", 401);
+  } catch (error) {
+    return text(formatAuthFailure(error), 401);
   }
 }
 
@@ -152,8 +153,8 @@ async function cliUploadUrlHandler(ctx: ActionCtx, request: Request) {
       userId,
     });
     return json({ uploadUrl });
-  } catch {
-    return text("Unauthorized", 401);
+  } catch (error) {
+    return text(formatAuthFailure(error), 401);
   }
 }
 
@@ -177,13 +178,13 @@ async function cliPublishHandler(ctx: ActionCtx, request: Request) {
     return json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Publish failed";
-    if (message.toLowerCase().includes("unauthorized")) return text("Unauthorized", 401);
+    if (message.toLowerCase().includes("unauthorized")) return text(formatAuthFailure(error), 401);
     return text(message, 400);
   }
 }
 
 function hasAcceptedLegacyLicenseTerms(acceptLicenseTerms: boolean | undefined) {
-  return acceptLicenseTerms !== false;
+  return acceptLicenseTerms === true;
 }
 
 export const cliPublishHttp = httpAction(cliPublishHandler);
@@ -203,12 +204,13 @@ async function cliSkillDeleteHandler(ctx: ActionCtx, request: Request, deleted: 
       userId,
       slug: args.slug,
       deleted,
+      reason: args.reason,
     });
     const ok = parseArk(ApiCliSkillDeleteResponseSchema, { ok: true }, "Delete response");
     return json(ok);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Delete failed";
-    if (message.toLowerCase().includes("unauthorized")) return text("Unauthorized", 401);
+    if (message.toLowerCase().includes("unauthorized")) return text(formatAuthFailure(error), 401);
     return text(message, 400);
   }
 }
@@ -246,14 +248,68 @@ async function cliTelemetrySyncHandler(ctx: ActionCtx, request: Request) {
     return json(ok);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Telemetry failed";
-    if (message.toLowerCase().includes("unauthorized")) return text("Unauthorized", 401);
+    if (message.toLowerCase().includes("unauthorized")) return text(formatAuthFailure(error), 401);
     return text(message, 400);
   }
 }
 
 export const cliTelemetrySyncHttp = httpAction(cliTelemetrySyncHandler);
 
-function json(value: unknown, status = 200) {
+async function cliDeviceCodeHandler(ctx: ActionCtx, request: Request) {
+  if (request.method !== "POST") return text("Method not allowed", 405);
+  const rate = await applyRateLimit(ctx, request, "write");
+  if (!rate.ok) return rate.response;
+
+  const body = (await request.json().catch(() => ({}))) as {
+    scope?: unknown;
+    label?: unknown;
+    site_url?: unknown;
+  };
+  const result = await ctx.runMutation(internal.cliDeviceAuth.createInternal, {
+    scope: typeof body.scope === "string" ? body.scope : undefined,
+    label: typeof body.label === "string" ? body.label : undefined,
+    siteUrl: typeof body.site_url === "string" ? body.site_url : undefined,
+  });
+  return json(result, 200, rate.headers);
+}
+
+export const cliDeviceCodeHttp = httpAction(cliDeviceCodeHandler);
+
+async function cliDeviceTokenHandler(ctx: ActionCtx, request: Request) {
+  if (request.method !== "POST") return text("Method not allowed", 405);
+  const rate = await applyRateLimit(ctx, request, "write");
+  if (!rate.ok) return rate.response;
+
+  const body = (await request.json().catch(() => null)) as {
+    device_code?: unknown;
+    grant_type?: unknown;
+  } | null;
+  const deviceCode = typeof body?.device_code === "string" ? body.device_code.trim() : "";
+  const grantType = typeof body?.grant_type === "string" ? body.grant_type.trim() : "";
+  if (!deviceCode) {
+    return json(
+      { error: "invalid_request", error_description: "device_code required" },
+      400,
+      rate.headers,
+    );
+  }
+  if (grantType !== "urn:ietf:params:oauth:grant-type:device_code") {
+    return json(
+      { error: "unsupported_grant_type", error_description: "device_code grant required" },
+      400,
+      rate.headers,
+    );
+  }
+
+  const result = await ctx.runMutation(internal.cliDeviceAuth.pollInternal, { deviceCode });
+  if ("access_token" in result) return json(result, 200, rate.headers);
+  const status = result.error === "authorization_pending" ? 428 : 400;
+  return json(result, status, rate.headers);
+}
+
+export const cliDeviceTokenHttp = httpAction(cliDeviceTokenHandler);
+
+function json(value: unknown, status = 200, headers?: HeadersInit) {
   return new Response(JSON.stringify(value), {
     status,
     headers: mergeHeaders(
@@ -261,12 +317,13 @@ function json(value: unknown, status = 200) {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       },
+      headers,
       corsHeaders(),
     ),
   });
 }
 
-function text(value: string, status: number) {
+function text(value: string, status: number, headers?: HeadersInit) {
   return new Response(value, {
     status,
     headers: mergeHeaders(
@@ -274,9 +331,16 @@ function text(value: string, status: number) {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-store",
       },
+      headers,
       corsHeaders(),
     ),
   });
+}
+
+function formatAuthFailure(error: unknown) {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (!message || /^unauthorized$/i.test(message)) return "Unauthorized";
+  return message.replace(/^ConvexError:\s*/i, "").trim() || "Unauthorized";
 }
 
 function toOptionalNumber(value: string | null) {
@@ -294,6 +358,7 @@ function parsePublishBody(body: unknown) {
     displayName: parsed.displayName,
     version: parsed.version,
     changelog: parsed.changelog,
+    clawScanNote: parsed.clawScanNote?.trim() || undefined,
     acceptLicenseTerms: parsed.acceptLicenseTerms,
     tags,
     source: parsed.source ?? undefined,
@@ -324,4 +389,6 @@ export const __handlers = {
   cliPublishHandler,
   cliSkillDeleteHandler,
   cliTelemetrySyncHandler,
+  cliDeviceCodeHandler,
+  cliDeviceTokenHandler,
 };

@@ -10,17 +10,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
 </p>
 
-ClawHub is the **public skill registry for Clawdbot**: publish, version, and search text-based agent skills (a `SKILL.md` plus supporting files).
+ClawHub is the **public skill registry for OpenClaw**: publish, version, and search text-based agent skills (a `SKILL.md` plus supporting files).
 It's designed for fast browsing + a CLI-friendly API, with moderation hooks and vector search.
 It also now exposes a native **OpenClaw package catalog** for code plugins and bundle plugins.
 
-onlycrabs.ai is the **SOUL.md registry**: publish and share system lore the same way you publish skills.
-
 <p align="center">
   <a href="https://clawhub.ai">ClawHub</a> ·
-  <a href="https://onlycrabs.ai">onlycrabs.ai</a> ·
   <a href="VISION.md">Vision</a> ·
-  <a href="docs/README.md">Docs</a> ·
+  <a href="docs/clawhub.md">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="https://discord.gg/clawd">Discord</a>
 </p>
@@ -35,15 +32,9 @@ onlycrabs.ai is the **SOUL.md registry**: publish and share system lore the same
 - Publish new soul versions with changelogs + tags.
 - Search via embeddings (vector index) instead of brittle keywords.
 - Star + comment; admins/mods can curate and approve skills.
+- Pin local skill installs so updates and force reinstalls cannot overwrite frozen copies.
 - Browse OpenClaw packages with family/trust/capability metadata.
 - Publish native code plugins and bundle plugins through `/packages` APIs and CLI flows.
-
-## onlycrabs.ai (SOUL.md registry)
-
-- Entry point is host-based: `onlycrabs.ai`.
-- On the onlycrabs.ai host, the home page and nav default to souls.
-- On ClawHub, souls live under `/souls`.
-- Soul bundles only accept `SOUL.md` for now (no extra files).
 
 ## How it works (high level)
 
@@ -57,12 +48,14 @@ onlycrabs.ai is the **SOUL.md registry**: publish and share system lore the same
 Common CLI flows:
 
 - Auth: `clawhub login`, `clawhub whoami`
+- Remote/headless auth: `clawhub login --device`
 - Discover: `clawhub search ...`, `clawhub explore`
 - Browse unified catalog (skills + plugins): `clawhub package explore`, `clawhub package inspect <name>`
-- Manage local installs: `clawhub install <slug>`, `clawhub uninstall <slug>`, `clawhub list`, `clawhub update --all`
+- Manage local installs: `clawhub install <slug>`, `clawhub pin <slug>`, `clawhub unpin <slug>`, `clawhub uninstall <slug>`, `clawhub list`, `clawhub update --all`
 - Inspect without installing: `clawhub inspect <slug>`
 - Publish/sync skills: `clawhub skill publish <path>`, `clawhub sync`
 - Publish plugins: `clawhub package publish <source>`
+- Code-plugin manifests must include `openclaw.compat.pluginApi` and `openclaw.build.openclawVersion`; see [`docs/cli.md`](docs/cli.md) for a minimal example.
 - Canonicalize owned skills: `clawhub skill rename <slug> <new-slug>`, `clawhub skill merge <source> <target>`
 
 Docs: [`docs/quickstart.md`](docs/quickstart.md), [`docs/cli.md`](docs/cli.md).
@@ -71,7 +64,8 @@ Docs: [`docs/quickstart.md`](docs/quickstart.md), [`docs/cli.md`](docs/cli.md).
 
 - `clawhub uninstall <slug>` only removes a local install on your machine.
 - Uploaded registry skills use soft-delete/restore (`clawhub delete <slug>` / `clawhub undelete <slug>` or API equivalents).
-- Soft-delete/restore is allowed for the skill owner, moderators, and admins.
+- Soft-delete/restore is allowed for the skill or package owner, publisher owner/admin, moderators, and admins.
+- Packages use `clawhub package delete <name>` / `clawhub package undelete <name>`.
 - Hard delete is admin-only (management tools / ban flows).
 - Owner rename keeps the old slug as a redirect alias.
 - Owner merge hides the source listing and redirects the old slug to the canonical target.
@@ -92,8 +86,9 @@ Details: [`docs/telemetry.md`](docs/telemetry.md).
 - `src/` — TanStack Start app (routes, components, styles).
 - `convex/` — schema + queries/mutations/actions + HTTP API routes.
 - `packages/schema/` — shared API types/routes for the CLI and app.
-- [`docs/`](docs/README.md) — project documentation (architecture, CLI, auth, deployment, and more).
-- [`docs/spec.md`](docs/spec.md) — product + implementation spec (good first read).
+- [`docs/`](docs/README.md) — publishable ClawHub public/operator docs for users, publishers, API clients, and deploy operators.
+- [`specs/`](specs/README.md) — product specs, plans, regression notes, and design history.
+- [`specs/spec.md`](specs/spec.md) — product + implementation spec (good first read for maintainers).
 
 ## Local dev
 
@@ -110,18 +105,24 @@ bunx convex dev
 # terminal B: web app (port 3000)
 bun run dev
 
-# seed sample data
-bunx convex run --no-push devSeed:seedNixSkills
+# detached/Codex worktree preview
+bun run dev:worktree
+
+# seed local QA fixtures and the public corpus
+bun run seed:dev
 ```
 
-For full setup instructions (env vars, GitHub OAuth, JWT keys, database seeding), see [CONTRIBUTING.md](CONTRIBUTING.md).
+`bun run seed:dev` waits for the local Convex deployment, runs the dev fixture seed, and refreshes
+global stats. The fixtures are owned by `@local` and are safe to rerun after fixture or schema
+changes. For reset/manual commands and full setup instructions (env vars, GitHub OAuth, JWT keys,
+database seeding), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Environment
 
 - `VITE_CONVEX_URL`: Convex deployment URL (`https://<deployment>.convex.cloud`).
 - `VITE_CONVEX_SITE_URL`: Convex site URL (`https://<deployment>.convex.site`).
-- `VITE_SOULHUB_SITE_URL`: onlycrabs.ai site URL (`https://onlycrabs.ai`).
-- `VITE_SOULHUB_HOST`: onlycrabs.ai host match (`onlycrabs.ai`).
+- `VITE_SOULHUB_SITE_URL`: SoulHub site URL.
+- `VITE_SOULHUB_HOST`: SoulHub host match.
 - `VITE_SITE_MODE`: Optional override (`skills` or `souls`) for SSR builds.
 - `CONVEX_SITE_URL`: same as `VITE_CONVEX_SITE_URL` (auth + cookies).
 - `SITE_URL`: App URL (local: `http://localhost:3000`).
@@ -198,7 +199,7 @@ metadata: { "clawdbot": { "cliHelp": "padel --help\\nUsage: padel [command]\\n" 
 
 ## Skill metadata
 
-Skills declare their runtime requirements (env vars, binaries, install specs) in the `SKILL.md` frontmatter. ClawHub's security analysis checks these declarations against actual skill behavior.
+Skills declare their runtime requirements (env vars, binaries, install specs) in the `SKILL.md` frontmatter. ClawHub's security analysis checks these declarations against actual skill behavior; purpose-aligned ClawScan notes stay as guidance, medium review findings stay visible, and the suspicious filter is reserved for high-impact or malicious concerns.
 
 Full reference: [`docs/skill-format.md`](docs/skill-format.md#frontmatter-metadata)
 

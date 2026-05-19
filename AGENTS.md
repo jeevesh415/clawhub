@@ -5,8 +5,16 @@
 - `src/` — TanStack Start app code (routes, components, styles).
 - `convex/` — Convex backend (schema, queries/mutations/actions, HTTP routes).
 - `convex/_generated/` — generated Convex API/types; committed for builds.
-- `docs/` — product/spec docs (see `docs/spec.md`).
+- `docs/` — publishable public/operator docs for the ClawHub docs tab.
+- `specs/` — product specs, plans, regression notes, design history (see `specs/spec.md`).
 - `public/` — static assets.
+
+## Durable Intent & Specs
+
+- Use `specs/` to persist system/subsystem intent, invariants, and design rationale that future agents should preserve.
+- Keep intended behavior for security-sensitive flows there, especially moderation, upload gating, scanner outcomes, appeals, bans, ownership, package installability, and API trust boundaries.
+- If code changes reveal or change how a subsystem is supposed to work, update the relevant spec or add a focused spec note instead of burying the intent only in PR text or public docs.
+- Keep `docs/` user/operator-facing: explain current behavior and commands there, but put internal “why this must work this way” context in `specs/`.
 
 ## Build, Test, and Development Commands
 
@@ -15,6 +23,7 @@
 - `bun run preview` — preview built app.
 - `bunx convex dev` — Convex dev deployment + function watcher.
 - `bunx convex codegen` — regenerate `convex/_generated`.
+- `bun run format:check` — formatting check.
 - `bun run lint` — Biome + oxlint (type-aware).
 - `bun run test` — Vitest (unit tests).
 - `bun run coverage` — coverage run; keep global >= 80%.
@@ -25,6 +34,7 @@
 - Indentation: 2 spaces, single quotes (Biome).
 - Lint/format: Biome + oxlint (type-aware).
 - Convex function names: verb-first (`getBySlug`, `publishVersion`).
+- Inline code comments: add brief comments for tricky, bug-prone, or previously buggy logic.
 
 ## Testing Guidelines
 
@@ -37,10 +47,14 @@
 
 - Commit messages: Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`…).
 - Keep changes scoped; avoid repo-wide search/replace.
+- Before commit/PR handoff, run `bun run ci:static` so formatting, linting, audit/peer checks, and dead-code export checks match the CI `static` job. For faster inner loops, targeted `bun run format:check -- <files>` / `bun run lint` are fine, but do not treat them as the final pre-push gate.
+- Before commit/PR handoff for non-trivial code changes, use `$autoreview` until no accepted/actionable findings remain, unless equivalent manual review already happened, the change is trivial/docs-only, or the user opts out.
+- Before opening a PR for source or test changes, run the targeted tests for the touched behavior and `bun run ci:unit` (`VITE_CONVEX_URL=https://example.invalid bun run coverage`) unless the change is docs/config-only or the user explicitly asks to rely on CI. For runtime, build, or package changes, also run the matching broader gate when it covers the touched surface: `bun run ci:types-build`, `bun run ci:packages`, `bun run ci:e2e-http`, or `bun run ci:playwright-smoke`.
 - PRs: include summary + test commands run. Add screenshots for UI changes.
 - Before merging any PR, verify TypeScript cleanly with `bunx tsc -p packages/schema/tsconfig.json --noEmit` and `bunx tsc -p packages/clawhub/tsconfig.json --noEmit`; if Convex code changed, also run the repo typecheck path used by deploy so `bunx convex deploy` will not fail on `tsc`.
 - GitHub comments: for multiline `gh` comments/close messages, use `--body-file`, `--input`, or stdin/heredoc with real newlines; never pass literal `\\n` in shell strings.
 - Reject PRs that add skills into source code/repo content directly (for example under `skills/` or seed-only additions intended as published skills). Skills must be uploaded/published via CLI.
+- Repo-local Convex developer skills under `.agents/skills/convex*/` are allowed when they support working on this codebase; keep top-level `skills/` reserved for installed/published skill content and ignored by git.
 
 ## Production Release
 
@@ -87,3 +101,33 @@
 - **32K document limit per query.** Split `.collect()` calls by a partition field (e.g., one day at a time instead of a 7-day range). See `rebuildTrendingLeaderboardAction` in `convex/leaderboards.ts` for an example.
 - **Common mistakes**: `.filter().collect()` without an index; `ctx.db.get()` on large docs in a loop for list views; while loops that paginate the whole table to find filtered results.
 - **Before writing or reviewing Convex queries, check deployment health.** Run `bunx convex insights` to check for OCC conflicts, `bytesReadLimit`, and `documentsReadLimit` errors. Run `bunx convex logs --failure` to see individual error messages and stack traces. This helps identify which functions are causing bandwidth issues so you can prioritize fixes.
+
+<!-- convex-ai-start -->
+
+This project uses [Convex](https://convex.dev) as its backend.
+
+When working on Convex code, **always read `convex/_generated/ai/guidelines.md` first** for important guidelines on how to correctly use Convex APIs and patterns. The file contains rules that override what you may have learned about Convex from training data.
+
+Convex agent skills for common tasks can be installed by running `npx convex ai-files install`.
+
+<!-- convex-ai-end -->
+
+## Stat Field Migration Rules
+
+The `skills` table maintains two parallel sets of stat fields as part of an in-progress field migration:
+
+| Legacy (nested, `@deprecated`) | Top-level (source of truth, indexable) |
+| ------------------------------ | -------------------------------------- |
+| `stats.downloads`              | `statsDownloads`                       |
+| `stats.stars`                  | `statsStars`                           |
+| `stats.installsCurrent`        | `statsInstallsCurrent`                 |
+| `stats.installsAllTime`        | `statsInstallsAllTime`                 |
+
+**Rules:**
+
+- **Always use `readCanonicalStat(skill, field)` (`convex/lib/skillStats.ts`) to read** any of the four migrated fields. It prefers the top-level field and falls back to the nested field for pre-migration documents. Never access `skill.stats.downloads` / `.stars` / `.installsCurrent` / `.installsAllTime` directly.
+- **Always use `applySkillStatDeltas()` to write** stat deltas. It writes both the top-level and nested fields in the same patch to keep them in sync.
+- **Both sets of fields must be written together** in any patch that touches stat values (see the return shape of `applySkillStatDeltas`).
+- **Nested-only reads are acceptable only for** `stats.comments` and `stats.versions` — no top-level field exists for these yet.
+- The four legacy nested fields are marked `@deprecated` in `statsValidator` (schema.ts). Any IDE access to `skill.stats.downloads` etc. will show a strikethrough warning — treat this as a signal to use `readCanonicalStat()` instead.
+- When adding new stat fields, follow the same dual-write pattern and add a cursor-based backfill mutation (see `backfillSkillStatFieldsInternal` for an example).

@@ -35,9 +35,7 @@ export function safeTextFileResponse(params: {
   const headers = mergeHeaders(
     params.headers,
     {
-      "Content-Type": contentType
-        ? `${contentType}; charset=utf-8`
-        : "text/plain; charset=utf-8",
+      "Content-Type": contentType ? `${contentType}; charset=utf-8` : "text/plain; charset=utf-8",
       "Cache-Control": "private, max-age=60",
       ETag: params.sha256,
       "X-Content-SHA256": params.sha256,
@@ -98,8 +96,8 @@ export async function requireApiTokenUserOrResponse(
   try {
     const auth = await requireApiTokenUser(ctx, request);
     return { ok: true as const, userId: auth.userId, user: auth.user as Doc<"users"> };
-  } catch {
-    return { ok: false as const, response: text("Unauthorized", 401, headers) };
+  } catch (error) {
+    return { ok: false as const, response: text(formatAuthFailure(error), 401, headers) };
   }
 }
 
@@ -110,8 +108,8 @@ export async function requirePackagePublishAuthOrResponse(
 ) {
   try {
     return { ok: true as const, auth: await requirePackagePublishAuth(ctx, request) };
-  } catch {
-    return { ok: false as const, response: text("Unauthorized", 401, headers) };
+  } catch (error) {
+    return { ok: false as const, response: text(formatAuthFailure(error), 401, headers) };
   }
 }
 
@@ -120,7 +118,7 @@ export function requireAdminOrResponse(user: Doc<"users">, headers: HeadersInit)
     assertAdmin(user);
     return { ok: true as const };
   } catch {
-    return { ok: false as const, response: text("Forbidden", 403, headers) };
+    return { ok: false as const, response: text("Admin role required.", 403, headers) };
   }
 }
 
@@ -149,16 +147,37 @@ export function toOptionalNumber(value: string | null) {
 export async function resolveSoulTagsBatch(
   ctx: ActionCtx,
   tagsList: Array<Record<string, Id<"soulVersions">>>,
+  latestVersions?: Array<LatestVersionTag<"soulVersions">>,
 ): Promise<Array<Record<string, string>>> {
-  return resolveVersionTagsBatch(ctx, tagsList, internal.souls.getVersionsByIdsInternal);
+  return resolveVersionTagsBatch(
+    ctx,
+    tagsList,
+    internal.souls.getVersionsByIdsInternal,
+    latestVersions,
+  );
 }
 
 export async function resolveTagsBatch(
   ctx: ActionCtx,
   tagsList: Array<Record<string, Id<"skillVersions">>>,
+  latestVersions?: Array<LatestVersionTag<"skillVersions">>,
 ): Promise<Array<Record<string, string>>> {
-  return resolveVersionTagsBatch(ctx, tagsList, internal.skills.getVersionsByIdsInternal);
+  return resolveVersionTagsBatch(
+    ctx,
+    tagsList,
+    internal.skills.getVersionsByIdsInternal,
+    latestVersions,
+  );
 }
+
+type LatestVersionTag<TTable extends "skillVersions" | "soulVersions"> =
+  | {
+      _id: Id<TTable>;
+      version?: string;
+      softDeletedAt?: unknown;
+    }
+  | null
+  | undefined;
 
 /**
  * Batch resolve version tags to version strings.
@@ -172,13 +191,25 @@ export async function resolveVersionTagsBatch<TTable extends "skillVersions" | "
   ctx: ActionCtx,
   tagsList: Array<Record<string, Id<TTable>>>,
   getVersionsByIdsQuery: unknown,
+  latestVersions?: Array<LatestVersionTag<TTable>>,
 ): Promise<Array<Record<string, string>>> {
   const allVersionIds = new Set<Id<TTable>>();
-  for (const tags of tagsList) {
-    for (const versionId of Object.values(tags)) allVersionIds.add(versionId);
-  }
+  const preResolvedTags = tagsList.map((tags, idx) => {
+    const resolved: Record<string, string> = {};
+    const latest = latestVersions?.[idx];
+    for (const [tag, versionId] of Object.entries(tags)) {
+      if (latest?._id === versionId && latest.version && !latest.softDeletedAt) {
+        resolved[tag] = latest.version;
+      } else {
+        allVersionIds.add(versionId);
+      }
+    }
+    return resolved;
+  });
 
-  if (allVersionIds.size === 0) return tagsList.map(() => ({}));
+  if (allVersionIds.size === 0) {
+    return preResolvedTags;
+  }
 
   const versionIds = [...allVersionIds].sort() as Array<Id<TTable>>;
   const versions =
@@ -193,9 +224,10 @@ export async function resolveVersionTagsBatch<TTable extends "skillVersions" | "
     if (!v?.softDeletedAt) versionMap.set(v._id, v.version);
   }
 
-  return tagsList.map((tags) => {
-    const resolved: Record<string, string> = {};
+  return tagsList.map((tags, idx) => {
+    const resolved = { ...preResolvedTags[idx] };
     for (const [tag, versionId] of Object.entries(tags)) {
+      if (resolved[tag]) continue;
       const version = versionMap.get(versionId);
       if (version) resolved[tag] = version;
     }
@@ -236,22 +268,7 @@ function toFileLike(entry: FormDataEntryValue): FileLikeEntry | null {
 export async function parseMultipartPublish(
   ctx: ActionCtx,
   request: Request,
-): Promise<{
-  slug: string;
-  displayName: string;
-  version: string;
-  changelog: string;
-  acceptLicenseTerms?: boolean;
-  tags?: string[];
-  forkOf?: { slug: string; version?: string };
-  files: Array<{
-    path: string;
-    size: number;
-    storageId: Id<"_storage">;
-    sha256: string;
-    contentType?: string;
-  }>;
-}> {
+): Promise<ReturnType<typeof parsePublishBody>> {
   const form = await request.formData();
   const payloadRaw = form.get("payload");
   if (!payloadRaw || typeof payloadRaw !== "string") {
@@ -293,8 +310,11 @@ export async function parseMultipartPublish(
   const body = {
     slug: payload.slug,
     displayName: payload.displayName,
+    ...(typeof payload.ownerHandle === "string" ? { ownerHandle: payload.ownerHandle } : {}),
+    ...(typeof payload.migrateOwner === "boolean" ? { migrateOwner: payload.migrateOwner } : {}),
     version: payload.version,
     changelog: typeof payload.changelog === "string" ? payload.changelog : "",
+    ...(typeof payload.clawScanNote === "string" ? { clawScanNote: payload.clawScanNote } : {}),
     ...(hasAcceptLicenseTerms ? { acceptLicenseTerms: payload.acceptLicenseTerms } : {}),
     tags: Array.isArray(payload.tags) ? payload.tags : undefined,
     ...(payload.source ? { source: payload.source } : {}),
@@ -312,6 +332,8 @@ export function parsePublishBody(body: unknown) {
   return {
     slug: parsed.slug,
     displayName: parsed.displayName,
+    ownerHandle: parsed.ownerHandle?.trim().replace(/^@+/, "") || undefined,
+    migrateOwner: parsed.migrateOwner === true ? true : undefined,
     version: parsed.version,
     changelog: parsed.changelog,
     acceptLicenseTerms: parsed.acceptLicenseTerms,
@@ -331,18 +353,41 @@ export function parsePublishBody(body: unknown) {
 }
 
 export function softDeleteErrorToResponse(
-  entity: "skill" | "soul",
+  entity: "skill" | "soul" | "package",
   error: unknown,
   headers: HeadersInit,
 ) {
   const message = error instanceof Error ? error.message : `${entity} delete failed`;
   const lower = message.toLowerCase();
 
-  if (lower.includes("unauthorized")) return text("Unauthorized", 401, headers);
-  if (lower.includes("forbidden")) return text("Forbidden", 403, headers);
+  if (lower.includes("unauthorized"))
+    return text(formatAuthzMessage(error, "Unauthorized"), 401, headers);
+  if (lower.includes("forbidden"))
+    return text(formatAuthzMessage(error, "Forbidden"), 403, headers);
   if (lower.includes("not found")) return text(message, 404, headers);
   if (lower.includes("slug required")) return text("Slug required", 400, headers);
 
   // Unknown: server-side failure. Keep body generic.
   return text("Internal Server Error", 500, headers);
+}
+
+function formatAuthFailure(error: unknown) {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (!message || /^unauthorized$/i.test(message)) return "Unauthorized";
+  return message.replace(/^ConvexError:\s*/i, "").trim() || "Unauthorized";
+}
+
+// Shared formatter for authz responses.
+// - Returns the clean fallback ("Unauthorized" | "Forbidden") when the error
+//   carries no additional context beyond the fallback itself (so existing
+//   callers that throw `new Error("Forbidden")` keep their body unchanged).
+// - Otherwise returns the full message (minus the `ConvexError:` prefix) so
+//   CLI/API clients can surface actionable reasons such as
+//   "Forbidden: This skill was hidden by moderation ...".
+export function formatAuthzMessage(error: unknown, fallback: "Unauthorized" | "Forbidden") {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (!message) return fallback;
+  const stripped = message.replace(/^ConvexError:\s*/i, "").trim();
+  if (!stripped || stripped.toLowerCase() === fallback.toLowerCase()) return fallback;
+  return stripped;
 }

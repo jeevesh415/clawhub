@@ -18,6 +18,7 @@ export type PublicSkill = Pick<
   | "slug"
   | "displayName"
   | "summary"
+  | "icon"
   | "ownerUserId"
   | "ownerPublisherId"
   | "canonicalSkillId"
@@ -27,6 +28,7 @@ export type PublicSkill = Pick<
   | "capabilityTags"
   | "badges"
   | "stats"
+  | "isSuspicious"
   | "createdAt"
   | "updatedAt"
 >;
@@ -44,6 +46,7 @@ export type HydratableSkill = Pick<
   | "slug"
   | "displayName"
   | "summary"
+  | "icon"
   | "ownerUserId"
   | "ownerPublisherId"
   | "canonicalSkillId"
@@ -62,6 +65,7 @@ export type HydratableSkill = Pick<
   | "moderationStatus"
   | "moderationFlags"
   | "moderationReason"
+  | "isSuspicious"
   | "createdAt"
   | "updatedAt"
 >;
@@ -137,6 +141,7 @@ export function toPublicSkill(skill: HydratableSkill | null | undefined): Public
     slug: skill.slug,
     displayName: skill.displayName,
     summary: skill.summary,
+    icon: skill.icon,
     ownerUserId: skill.ownerUserId,
     ownerPublisherId: skill.ownerPublisherId,
     canonicalSkillId: skill.canonicalSkillId,
@@ -146,6 +151,7 @@ export function toPublicSkill(skill: HydratableSkill | null | undefined): Public
     capabilityTags: skill.capabilityTags,
     badges: skill.badges,
     stats,
+    isSuspicious: skill.isSuspicious,
     createdAt: skill.createdAt,
     updatedAt: skill.updatedAt,
   };

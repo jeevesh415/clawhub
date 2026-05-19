@@ -1,6 +1,7 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import type { HydratableSkill, PublicPublisher } from "./public";
+import { tokenize } from "./searchText";
 
 function pick<T extends Record<string, unknown>, K extends keyof T>(obj: T, keys: K[]): Pick<T, K> {
   return Object.fromEntries(keys.map((k) => [k, obj[k]])) as Pick<T, K>;
@@ -17,6 +18,7 @@ const SHARED_KEYS = [
   "slug",
   "displayName",
   "summary",
+  "icon",
   "ownerUserId",
   "ownerPublisherId",
   "canonicalSkillId",
@@ -35,6 +37,7 @@ const SHARED_KEYS = [
   "moderationStatus",
   "moderationFlags",
   "moderationReason",
+  "isSuspicious",
   "createdAt",
   "updatedAt",
 ] as const satisfies readonly SharedSkillKey[];
@@ -42,7 +45,10 @@ const SHARED_KEYS = [
 /** Fields stored in the skillSearchDigest table. */
 export type SkillSearchDigestFields = Pick<Doc<"skills">, (typeof SHARED_KEYS)[number]> & {
   skillId: Id<"skills">;
-  isSuspicious?: boolean;
+  normalizedSlug?: string;
+  normalizedSlugFirstToken?: string;
+  normalizedDisplayName?: string;
+  normalizedDisplayNameFirstToken?: string;
   ownerHandle?: string;
   ownerKind?: "user" | "org";
   ownerName?: string;
@@ -55,8 +61,19 @@ export function extractDigestFields(skill: Doc<"skills">): SkillSearchDigestFiel
   return {
     ...pick(skill, [...SHARED_KEYS]),
     skillId: skill._id,
-    isSuspicious: skill.isSuspicious,
+    normalizedSlug: normalizeSkillSearchText(skill.slug),
+    normalizedSlugFirstToken: getFirstSearchToken(skill.slug),
+    normalizedDisplayName: normalizeSkillSearchText(skill.displayName),
+    normalizedDisplayNameFirstToken: getFirstSearchToken(skill.displayName),
   };
+}
+
+export function normalizeSkillSearchText(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function getFirstSearchToken(value: string) {
+  return tokenize(value)[0];
 }
 
 /**

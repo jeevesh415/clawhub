@@ -1,7 +1,6 @@
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
-import { requireApiTokenUser } from "../lib/apiTokenAuth";
 import { applyRateLimit } from "../lib/httpRateLimit";
 import {
   getPathSegments,
@@ -12,6 +11,30 @@ import {
   text,
   toOptionalNumber,
 } from "./shared";
+
+const usersV1InternalRefs = internal as unknown as {
+  users: {
+    getByHandleInternal: unknown;
+    remediateAutobansInternal: unknown;
+    reclassifyBanInternal: unknown;
+  };
+};
+
+async function runUsersV1QueryRef<T>(
+  ctx: Pick<ActionCtx, "runQuery">,
+  ref: unknown,
+  args: unknown,
+): Promise<T> {
+  return (await ctx.runQuery(ref as never, args as never)) as T;
+}
+
+async function runUsersV1MutationRef<T>(
+  ctx: Pick<ActionCtx, "runMutation">,
+  ref: unknown,
+  args: unknown,
+): Promise<T> {
+  return (await ctx.runMutation(ref as never, args as never)) as T;
+}
 
 export async function usersPostRouterV1Handler(ctx: ActionCtx, request: Request) {
   const rate = await applyRateLimit(ctx, request, "write");
@@ -24,9 +47,13 @@ export async function usersPostRouterV1Handler(ctx: ActionCtx, request: Request)
   const action = segments[0];
   if (
     action !== "ban" &&
+    action !== "unban" &&
     action !== "role" &&
     action !== "restore" &&
+    action !== "remediate-autobans" &&
+    action !== "reclassify-ban" &&
     action !== "reclaim" &&
+    action !== "reserve" &&
     action !== "publisher"
   ) {
     return text("Not found", 404, rate.headers);
@@ -48,10 +75,28 @@ export async function usersPostRouterV1Handler(ctx: ActionCtx, request: Request)
     return handleAdminRestore(ctx, request, payload, actorUserId, rate.headers);
   }
 
+  if (action === "remediate-autobans") {
+    const admin = requireAdminOrResponse(actorUser, rate.headers);
+    if (!admin.ok) return admin.response;
+    return handleAdminRemediateAutobans(ctx, payload, actorUserId, rate.headers);
+  }
+
+  if (action === "reclassify-ban") {
+    const admin = requireAdminOrResponse(actorUser, rate.headers);
+    if (!admin.ok) return admin.response;
+    return handleAdminReclassifyBan(ctx, payload, actorUserId, rate.headers);
+  }
+
   if (action === "reclaim") {
     const admin = requireAdminOrResponse(actorUser, rate.headers);
     if (!admin.ok) return admin.response;
     return handleAdminReclaim(ctx, request, payload, actorUserId, rate.headers);
+  }
+
+  if (action === "reserve") {
+    const admin = requireAdminOrResponse(actorUser, rate.headers);
+    if (!admin.ok) return admin.response;
+    return handleAdminReserve(ctx, payload, actorUserId, rate.headers);
   }
 
   if (action === "publisher") {
@@ -109,6 +154,30 @@ export async function usersPostRouterV1Handler(ctx: ActionCtx, request: Request)
     }
   }
 
+  if (action === "unban") {
+    const reason = reasonRaw.length > 0 ? reasonRaw : undefined;
+    if (reason && reason.length > 500) {
+      return text("Reason too long (max 500 chars)", 400, rate.headers);
+    }
+    try {
+      const result = await ctx.runMutation(internal.users.unbanUserInternal, {
+        actorUserId,
+        targetUserId,
+        reason,
+      });
+      return json(result, 200, rate.headers);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unban failed";
+      if (message.toLowerCase().includes("forbidden")) {
+        return text("Forbidden", 403, rate.headers);
+      }
+      if (message.toLowerCase().includes("not found")) {
+        return text(message, 404, rate.headers);
+      }
+      return text(message, 400, rate.headers);
+    }
+  }
+
   if (!role) {
     return text("Invalid role", 400, rate.headers);
   }
@@ -129,6 +198,117 @@ export async function usersPostRouterV1Handler(ctx: ActionCtx, request: Request)
       return text(message, 404, rate.headers);
     }
     return text(message, 400, rate.headers);
+  }
+}
+
+async function handleAdminReclassifyBan(
+  ctx: ActionCtx,
+  payload: unknown,
+  actorUserId: Id<"users">,
+  headers: HeadersInit,
+) {
+  const body = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const handle = typeof body.handle === "string" ? body.handle.trim() : "";
+  const userId = typeof body.userId === "string" ? body.userId.trim() : "";
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  const dryRun = body.dryRun !== false;
+
+  if (handle && userId) return text("Pass handle or userId, not both", 400, headers);
+  if (!handle && !userId) return text("Missing userId or handle", 400, headers);
+  if (!reason) return text("Missing reason", 400, headers);
+  if (reason.length > 500) return text("Reason too long (max 500 chars)", 400, headers);
+
+  let targetUserId: Id<"users"> | null = userId ? (userId as Id<"users">) : null;
+  if (!targetUserId) {
+    const user = await runUsersV1QueryRef<{ _id?: Id<"users"> } | null>(
+      ctx,
+      usersV1InternalRefs.users.getByHandleInternal,
+      { handle: handle.toLowerCase() },
+    );
+    if (!user?._id) return text("User not found", 404, headers);
+    targetUserId = user._id;
+  }
+
+  try {
+    const result = await runUsersV1MutationRef(
+      ctx,
+      usersV1InternalRefs.users.reclassifyBanInternal,
+      {
+        actorUserId,
+        targetUserId,
+        reason,
+        dryRun,
+      },
+    );
+    return json(result, 200, headers);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Ban reclassification failed";
+    if (message.toLowerCase().includes("forbidden")) {
+      return text("Forbidden", 403, headers);
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return text(message, 404, headers);
+    }
+    return text(message, 400, headers);
+  }
+}
+
+async function handleAdminRemediateAutobans(
+  ctx: ActionCtx,
+  payload: unknown,
+  actorUserId: Id<"users">,
+  headers: HeadersInit,
+) {
+  const body = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const handle = typeof body.handle === "string" ? body.handle.trim() : "";
+  const userId = typeof body.userId === "string" ? body.userId.trim() : "";
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  const since = typeof body.since === "string" ? body.since.trim() : "";
+  const cursor = typeof body.cursor === "string" ? body.cursor.trim() : "";
+  const dryRun = body.dryRun !== false;
+  const limit =
+    typeof body.limit === "number"
+      ? body.limit
+      : typeof body.limit === "string" || body.limit === null
+        ? toOptionalNumber(body.limit)
+        : undefined;
+
+  if (handle && userId) return text("Pass handle or userId, not both", 400, headers);
+  if (reason && reason.length > 500) {
+    return text("Reason too long (max 500 chars)", 400, headers);
+  }
+  if (since && Number.isNaN(Date.parse(since))) {
+    return text("Invalid since date", 400, headers);
+  }
+  if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+    return text("Invalid limit", 400, headers);
+  }
+
+  try {
+    const result = await runUsersV1MutationRef(
+      ctx,
+      usersV1InternalRefs.users.remediateAutobansInternal,
+      {
+        actorUserId,
+        ...(userId ? { targetUserId: userId as Id<"users"> } : {}),
+        ...(handle ? { handle } : {}),
+        dryRun,
+        ...(reason ? { reason } : {}),
+        ...(since ? { since } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      },
+    );
+    return json(result, 200, headers);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Autoban remediation failed";
+    if (message.toLowerCase().includes("forbidden")) {
+      return text("Forbidden", 403, headers);
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return text(message, 404, headers);
+    }
+    return text(message, 400, headers);
   }
 }
 
@@ -227,6 +407,91 @@ async function handleAdminReclaim(
   return json({ ok: true, results, succeeded, failed }, 200, headers);
 }
 
+/**
+ * POST /api/v1/users/reserve
+ * Admin-only: reserve root slugs and package names for a rightful owner.
+ * Package reservations are private placeholder packages with no releases.
+ * Body: { handle: string, slugs?: string[], packageNames?: string[], reason?: string }
+ */
+async function handleAdminReserve(
+  ctx: ActionCtx,
+  payload: Record<string, unknown>,
+  actorUserId: Id<"users">,
+  headers: HeadersInit,
+) {
+  const handle = typeof payload.handle === "string" ? payload.handle.trim().toLowerCase() : "";
+  if (!handle) return text("Missing handle", 400, headers);
+
+  const slugs = Array.isArray(payload.slugs)
+    ? payload.slugs.filter((s): s is string => typeof s === "string")
+    : [];
+  const packageNames = Array.isArray(payload.packageNames)
+    ? payload.packageNames.filter((s): s is string => typeof s === "string")
+    : [];
+  const total = slugs.length + packageNames.length;
+  if (total === 0) return text("Missing slugs or packageNames array", 400, headers);
+  if (total > 200) return text("Too many reservations (max 200)", 400, headers);
+
+  const reason = typeof payload.reason === "string" ? payload.reason.trim() : undefined;
+
+  const targetUser = await ctx.runQuery(api.users.getByHandle, { handle });
+  if (!targetUser?._id) return text("User not found", 404, headers);
+
+  const targetPublisher = (await ctx.runQuery(internal.publishers.getByHandleInternal, {
+    handle,
+  })) as { _id?: Id<"publishers">; deletedAt?: number; deactivatedAt?: number } | null;
+  const ownerPublisherId =
+    targetPublisher?._id && !targetPublisher.deletedAt && !targetPublisher.deactivatedAt
+      ? targetPublisher._id
+      : undefined;
+
+  const results: Array<{
+    kind: "slug" | "package";
+    name: string;
+    ok: boolean;
+    action?: string;
+    error?: string;
+  }> = [];
+
+  for (const slug of slugs) {
+    const name = slug.trim().toLowerCase();
+    try {
+      const result = (await ctx.runMutation(internal.skills.reserveSlugInternal, {
+        actorUserId,
+        slug: name,
+        rightfulOwnerUserId: targetUser._id,
+        reason,
+      })) as { action?: string };
+      results.push({ kind: "slug", name, ok: true, action: result.action });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Slug reservation failed";
+      results.push({ kind: "slug", name, ok: false, error: message });
+    }
+  }
+
+  for (const packageName of packageNames) {
+    const name = packageName.trim();
+    try {
+      const result = (await ctx.runMutation(internal.packages.reservePackageNameInternal, {
+        actorUserId,
+        ownerUserId: targetUser._id,
+        ownerPublisherId,
+        name,
+        reason,
+      })) as { action?: string };
+      results.push({ kind: "package", name, ok: true, action: result.action });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Package reservation failed";
+      results.push({ kind: "package", name, ok: false, error: message });
+    }
+  }
+
+  const succeeded = results.filter((r) => r.ok).length;
+  const failed = results.filter((r) => !r.ok).length;
+
+  return json({ ok: true, results, succeeded, failed }, 200, headers);
+}
+
 async function handleAdminEnsurePublisher(
   ctx: ActionCtx,
   payload: Record<string, unknown>,
@@ -268,13 +533,9 @@ export async function usersListV1Handler(ctx: ActionCtx, request: Request) {
   const limitRaw = toOptionalNumber(url.searchParams.get("limit"));
   const query = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
 
-  let actorUserId: Id<"users">;
-  try {
-    const auth = await requireApiTokenUser(ctx, request);
-    actorUserId = auth.userId;
-  } catch {
-    return text("Unauthorized", 401, rate.headers);
-  }
+  const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+  if (!auth.ok) return auth.response;
+  const actorUserId = auth.userId;
 
   const limit = Math.min(Math.max(limitRaw ?? 20, 1), 200);
   try {
@@ -290,7 +551,7 @@ export async function usersListV1Handler(ctx: ActionCtx, request: Request) {
       return text("Forbidden", 403, rate.headers);
     }
     if (message.toLowerCase().includes("unauthorized")) {
-      return text("Unauthorized", 401, rate.headers);
+      return text(message, 401, rate.headers);
     }
     return text(message, 400, rate.headers);
   }

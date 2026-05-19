@@ -1,7 +1,9 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import { internalMutation, internalQuery } from "./functions";
 import {
+  assertCanManageOwnedResource,
   ensurePersonalPublisherForUser,
   getActiveUserByHandleOrPersonalPublisher,
 } from "./lib/publishers";
@@ -22,6 +24,21 @@ async function requireActiveUserById(ctx: unknown, userId: Id<"users">) {
   const user = await db.get(userId);
   if (!user || user.deletedAt || user.deactivatedAt) throw new Error("Unauthorized");
   return user;
+}
+
+async function assertCanRequestSkillTransfer(
+  ctx: MutationCtx,
+  actor: Doc<"users">,
+  skill: Doc<"skills">,
+) {
+  if (skill.ownerUserId === actor._id) return;
+  await assertCanManageOwnedResource(ctx, {
+    actor,
+    ownerUserId: skill.ownerUserId,
+    ownerPublisherId: skill.ownerPublisherId,
+    allowedPublisherRoles: ["admin"],
+    allowPlatformAdmin: true,
+  });
 }
 
 async function getActivePendingTransferForSkill(ctx: unknown, skillId: Id<"skills">, now: number) {
@@ -106,11 +123,11 @@ export const requestTransferInternal = internalMutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    await requireActiveUserById(ctx, args.actorUserId);
+    const actor = await requireActiveUserById(ctx, args.actorUserId);
 
     const skill = await ctx.db.get(args.skillId);
     if (!skill || skill.softDeletedAt) throw new Error("Skill not found");
-    if (skill.ownerUserId !== args.actorUserId) throw new Error("Forbidden");
+    await assertCanRequestSkillTransfer(ctx, actor, skill);
 
     const toHandle = normalizeHandle(args.toUserHandle);
     if (!toHandle) throw new Error("toUserHandle required");
@@ -166,15 +183,36 @@ export const acceptTransferInternal = internalMutation({
       role: "recipient",
       now,
     });
+    const cancelTransfer = async (message: string) => {
+      await ctx.db.patch(transfer._id, { status: "cancelled" as const, respondedAt: now });
+      return { ok: false as const, error: message };
+    };
 
     const skill = await ctx.db.get(transfer.skillId);
     if (!skill || skill.softDeletedAt) throw new Error("Skill not found");
+    if (
+      skill.moderationVerdict === "malicious" ||
+      skill.moderationStatus === "hidden" ||
+      skill.moderationStatus === "removed"
+    ) {
+      return await cancelTransfer("Skill is under moderation");
+    }
+    const requester = await ctx.db.get(transfer.fromUserId);
+    if (!requester || requester.deletedAt || requester.deactivatedAt) {
+      return await cancelTransfer("Transfer is no longer valid");
+    }
     if (skill.ownerUserId !== transfer.fromUserId) {
-      await ctx.db.patch(transfer._id, { status: "cancelled", respondedAt: now });
-      throw new Error("Transfer is no longer valid");
+      try {
+        await assertCanRequestSkillTransfer(ctx, requester, skill);
+      } catch {
+        return await cancelTransfer("Transfer is no longer valid");
+      }
     }
 
-    const newPublisher = await ensurePersonalPublisherForUser(ctx, newOwner);
+    const newPublisher = await ensurePersonalPublisherForUser(ctx, newOwner, {
+      actorUserId: args.actorUserId,
+      source: "skill.transfer.accept",
+    });
     if (!newPublisher) throw new Error("Failed to resolve publisher for new owner");
 
     await ctx.db.patch(skill._id, {
@@ -191,6 +229,17 @@ export const acceptTransferInternal = internalMutation({
       await ctx.db.patch(alias._id, {
         ownerUserId: args.actorUserId,
         ownerPublisherId: newPublisher._id,
+        updatedAt: now,
+      });
+    }
+
+    const embeddings = await ctx.db
+      .query("skillEmbeddings")
+      .withIndex("by_skill", (q) => q.eq("skillId", skill._id))
+      .collect();
+    for (const embedding of embeddings) {
+      await ctx.db.patch(embedding._id, {
+        ownerId: args.actorUserId,
         updatedAt: now,
       });
     }

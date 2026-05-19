@@ -23,6 +23,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("convex/react", () => ({
+  ConvexReactClient: class {},
   useAction: (...args: unknown[]) => convexReactMocks.useAction(...args),
   useQuery: (...args: unknown[]) => convexReactMocks.useQuery(...args),
 }));
@@ -56,7 +57,6 @@ describe("SkillsIndex", () => {
         sort: "downloads",
         dir: "desc",
         highlightedOnly: false,
-        nonSuspiciousOnly: false,
         cursor: undefined,
         numItems: 25,
       }),
@@ -66,7 +66,15 @@ describe("SkillsIndex", () => {
   it("renders an empty state when no skills are returned", async () => {
     render(<SkillsIndex />);
     await act(async () => {});
-    expect(screen.getByText("No skills match that filter")).toBeTruthy();
+    expect(screen.getByText("No skills found")).toBeTruthy();
+  });
+
+  it("does not render the publish CTA on the skills browse page", async () => {
+    render(<SkillsIndex />);
+    await act(async () => {});
+
+    expect(screen.queryByRole("link", { name: "Publish" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Publish" })).toBeNull();
   });
 
   it("shows loading state before fetch completes", async () => {
@@ -74,9 +82,40 @@ describe("SkillsIndex", () => {
     convexHttpMock.query.mockReturnValue(new Promise(() => {}));
     render(<SkillsIndex />);
     await act(async () => {});
-    // Header subtitle shows "Loading skills..."
-    expect(screen.getAllByText("Loading skills...").length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText("No skills match that filter")).toBeNull();
+    // Results area shows skeleton or dash while loading
+    expect(screen.getByText("\u2014")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Loading results" })).toBeTruthy();
+    expect(screen.queryByText("No skills found")).toBeNull();
+  });
+
+  it("uses grid as the canonical browse view URL value", async () => {
+    render(<SkillsIndex />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Grid" }));
+
+    const lastCall = navigateMock.mock.calls.at(-1)?.[0] as {
+      replace?: boolean;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(lastCall.replace).toBe(true);
+    expect(lastCall.search({})).toEqual({ view: "grid" });
+  });
+
+  it("keeps legacy cards URLs compatible with the grid view", async () => {
+    searchMock = { view: "cards" };
+    render(<SkillsIndex />);
+
+    const gridButton = screen.getByRole("button", { name: "Grid" });
+    expect(gridButton.className).toContain("is-active");
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    const lastCall = navigateMock.mock.calls.at(-1)?.[0] as {
+      replace?: boolean;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(lastCall.replace).toBe(true);
+    expect(lastCall.search({ view: "cards" })).toEqual({ view: undefined });
   });
 
   it("shows empty state immediately when search returns no results", async () => {
@@ -91,8 +130,8 @@ describe("SkillsIndex", () => {
     });
 
     // Should show empty state, not loading
-    expect(screen.getByText("No skills match that filter")).toBeTruthy();
-    expect(screen.queryByText("Loading skills...")).toBeNull();
+    expect(screen.getByText("No skills found")).toBeTruthy();
+    expect(screen.queryByText(/Loading skills/)).toBeNull();
   });
 
   it("skips list fetch and calls search when query is set", async () => {
@@ -116,7 +155,6 @@ describe("SkillsIndex", () => {
     expect(actionFn).toHaveBeenCalledWith({
       query: "remind",
       highlightedOnly: false,
-      nonSuspiciousOnly: false,
       limit: 25,
     });
     await act(async () => {
@@ -125,7 +163,6 @@ describe("SkillsIndex", () => {
     expect(actionFn).toHaveBeenCalledWith({
       query: "remind",
       highlightedOnly: false,
-      nonSuspiciousOnly: false,
       limit: 25,
     });
   });
@@ -136,7 +173,7 @@ describe("SkillsIndex", () => {
 
     render(<SkillsIndex />);
 
-    const input = screen.getByPlaceholderText("Search skills by name, slug, or summary...");
+    const input = screen.getByPlaceholderText("Search skills...");
     await act(async () => {
       fireEvent.change(input, { target: { value: "cli-design-framework" } });
       await vi.runAllTimersAsync();
@@ -161,7 +198,7 @@ describe("SkillsIndex", () => {
 
     render(<SkillsIndex />);
 
-    const input = screen.getByPlaceholderText("Search skills by name, slug, or summary...");
+    const input = screen.getByPlaceholderText("Search skills...");
     await act(async () => {
       fireEvent.change(input, { target: { value: "cli-design-framework" } });
       await vi.runAllTimersAsync();
@@ -204,7 +241,6 @@ describe("SkillsIndex", () => {
     expect(actionFn).toHaveBeenLastCalledWith({
       query: "remind",
       highlightedOnly: false,
-      nonSuspiciousOnly: false,
       limit: 50,
     });
   });
@@ -229,7 +265,7 @@ describe("SkillsIndex", () => {
       await vi.runAllTimersAsync();
     });
 
-    const links = screen.getAllByRole("link");
+    const links = screen.getAllByRole("link").filter((link) => link.textContent?.includes("Skill"));
     expect(links[0]?.textContent).toContain("Skill B");
     expect(links[1]?.textContent).toContain("Skill A");
     expect(links[2]?.textContent).toContain("Skill C");
@@ -251,25 +287,25 @@ describe("SkillsIndex", () => {
       await vi.runAllTimersAsync();
     });
 
-    const links = screen.getAllByRole("link");
-    expect(links[0]?.textContent).toContain("Older High Score");
-    expect(links[1]?.textContent).toContain("Newer Low Score");
+    const titles = Array.from(document.querySelectorAll(".skill-list-item-name")).map(
+      (node) => node.textContent,
+    );
+
+    expect(titles[0]).toBe("Older High Score");
+    expect(titles[1]).toBe("Newer Low Score");
   });
 
-  it("passes nonSuspiciousOnly to list query when filter is active", async () => {
-    searchMock = { nonSuspicious: true };
+  it("does not render the warning filter", async () => {
+    convexHttpMock.query.mockResolvedValue({
+      page: [makeListResult("clean-skill", "Clean Skill")],
+      hasMore: false,
+      nextCursor: null,
+    });
+
     render(<SkillsIndex />);
     await act(async () => {});
 
-    expect(convexHttpMock.query).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        sort: "downloads",
-        dir: "desc",
-        highlightedOnly: false,
-        nonSuspiciousOnly: true,
-      }),
-    );
+    expect(screen.queryByLabelText("Hide warnings")).toBeNull();
   });
 
   it("passes highlightedOnly to list query when filter is active", async () => {
@@ -283,45 +319,8 @@ describe("SkillsIndex", () => {
         sort: "downloads",
         dir: "desc",
         highlightedOnly: true,
-        nonSuspiciousOnly: false,
       }),
     );
-  });
-
-  it("passes capabilityTag to list query when tag filter is active", async () => {
-    searchMock = { tag: "crypto" };
-    render(<SkillsIndex />);
-    await act(async () => {});
-
-    expect(convexHttpMock.query).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        capabilityTag: "crypto",
-      }),
-    );
-  });
-
-  it("shows and clears the active capability tag filter", async () => {
-    searchMock = { tag: "crypto" };
-    render(<SkillsIndex />);
-    await act(async () => {});
-
-    const capabilityChip = screen.getByRole("button", { name: /crypto/i });
-    expect(capabilityChip).toBeTruthy();
-
-    await act(async () => {
-      fireEvent.click(capabilityChip);
-    });
-
-    expect(navigateMock).toHaveBeenCalled();
-    const lastCall = navigateMock.mock.calls.at(-1)?.[0] as {
-      replace?: boolean;
-      search: (prev: Record<string, unknown>) => Record<string, unknown>;
-    };
-    expect(lastCall.replace).toBe(true);
-    expect(lastCall.search({ tag: "crypto" })).toEqual({
-      tag: undefined,
-    });
   });
 
   it("shows load-more button when more results are available", async () => {
@@ -337,7 +336,7 @@ describe("SkillsIndex", () => {
     expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
   });
 
-  it("shows loading indicator during load-more", async () => {
+  it("shows skeletons during load-more", async () => {
     vi.stubGlobal("IntersectionObserver", undefined);
     convexHttpMock.query
       .mockResolvedValueOnce({
@@ -356,11 +355,16 @@ describe("SkillsIndex", () => {
       fireEvent.click(loadMoreButton);
     });
 
-    expect(screen.getByRole("button", { name: "Load more" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("status", { name: "Loading results" })).toBeTruthy();
+    expect(screen.queryByText(/Loading/)).toBeNull();
   });
 });
 
-function makeListResult(slug: string, displayName: string) {
+function makeListResult(
+  slug: string,
+  displayName: string,
+  options: { isSuspicious?: boolean } = {},
+) {
   return {
     skill: {
       _id: `skill_${slug}`,
@@ -376,6 +380,7 @@ function makeListResult(slug: string, displayName: string) {
         versions: 1,
         comments: 0,
       },
+      isSuspicious: options.isSuspicious,
       createdAt: 0,
       updatedAt: 0,
     },

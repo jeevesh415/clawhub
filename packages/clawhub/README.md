@@ -19,7 +19,9 @@ clawhub login
 # or
 clawhub auth login
 
-# Headless / token paste
+# Remote/headless browser approval
+clawhub login --device
+
 # or (token paste / headless)
 clawhub login --token clh_...
 ```
@@ -27,6 +29,7 @@ clawhub login --token clh_...
 Notes:
 
 - Browser login opens `https://clawhub.ai/cli/auth` and completes via a loopback callback.
+- Device login prints a one-time code and waits while you approve it at `https://clawhub.ai/cli/device`.
 - Default config path:
   - macOS: `~/Library/Application Support/clawhub/config.json`
   - Linux/XDG: `$XDG_CONFIG_HOME/clawhub/config.json` or `~/.config/clawhub/config.json`
@@ -39,17 +42,79 @@ Notes:
 ```bash
 clawhub search "postgres backups"
 clawhub install my-skill-pack
+clawhub pin bear-notes --reason "scanner-flagged while awaiting moderation"
 clawhub update --all
 clawhub update --all --no-input --force
+clawhub unpin bear-notes
 clawhub skill publish ./my-skill-pack --slug my-skill-pack --name "My Skill Pack" --version 1.2.0 --changelog "Fixes + docs"
+clawhub skill publish ./org-skill --owner openclaw --version 1.2.0 --changelog "Org publish"
 clawhub package explore --family skill
 clawhub package explore --family code-plugin
 clawhub package inspect @openclaw/example-plugin
+clawhub package download @openclaw/example-plugin --tag latest
+clawhub package verify ./example-plugin-1.0.0.tgz --package @openclaw/example-plugin --version 1.0.0
 clawhub package publish openclaw/example-plugin
 clawhub package publish openclaw/example-plugin@v1.0.0
 clawhub package publish https://github.com/openclaw/example-plugin --dry-run
+clawhub package publish ./example-plugin-1.0.0.tgz --dry-run
 clawhub package publish ./example-plugin
 ```
+
+## Publish code plugins
+
+For ClawPack publish, create the npm-pack tarball yourself and upload that
+exact `.tgz`:
+
+```bash
+npm pack
+clawhub package publish ./my-plugin-1.0.0.tgz --family code-plugin --dry-run
+clawhub package publish ./my-plugin-1.0.0.tgz --family code-plugin
+```
+
+For local plugin folders, start with a dry run:
+
+```bash
+clawhub package publish ./my-plugin --family code-plugin --dry-run
+clawhub package publish ./my-plugin --family code-plugin
+```
+
+For code plugins, folder publish builds and uploads a ClawPack artifact from
+the package folder. Bundle-plugin folders still use the extracted-file publish
+path.
+
+Use `clawhub package download` to resolve the published artifact through
+ClawHub's explicit artifact route. ClawPack downloads are verified against npm
+integrity/shasum plus ClawHub SHA-256; legacy package versions still download
+as ZIPs.
+
+`code-plugin` packages must declare these `package.json` fields:
+
+- `openclaw.compat.pluginApi`
+- `openclaw.build.openclawVersion`
+
+Minimal example:
+
+```json
+{
+  "name": "@myorg/openclaw-my-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2"
+    }
+  }
+}
+```
+
+`package.json.version` does not replace these OpenClaw-specific fields. Add
+`openclaw.compat.minGatewayVersion` and
+`openclaw.build.pluginSdkVersion` when you want richer compatibility metadata,
+but they are not required for publish.
 
 ## GitHub Actions
 
@@ -59,6 +124,8 @@ This repo also provides an official reusable workflow for plugin repos:
 
 Use `dry_run: true` on pull requests and reserve real publishes for trusted events
 such as `workflow_dispatch` or tag pushes with a `CLAWHUB_TOKEN` secret.
+For monorepos, pass `source_path` to publish the plugin package folder, for
+example `source_path: extensions/codex`.
 
 ## Maintainers
 

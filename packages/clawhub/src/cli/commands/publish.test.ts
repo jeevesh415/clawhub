@@ -11,6 +11,7 @@ import {
   createUiModuleMocks,
   makeGlobalOpts,
 } from "../../../test/cliCommandTestKit.js";
+import { MAX_CLAWSCAN_NOTE_CHARS } from "../../schema/index.js";
 
 const authTokenMocks = createAuthTokenModuleMocks();
 const registryMocks = createRegistryModuleMocks();
@@ -61,6 +62,7 @@ describe("cmdPublish", () => {
         version: "1.0.0",
         changelog: "",
         tags: "latest",
+        clawscanNote: "This skill needs network access to call the user's configured API.",
       });
 
       const publishCall = httpMocks.apiRequestForm.mock.calls.find((call) => {
@@ -76,10 +78,34 @@ describe("cmdPublish", () => {
       expect(payload.displayName).toBe("My Skill");
       expect(payload.version).toBe("1.0.0");
       expect(payload.changelog).toBe("");
+      expect(payload.clawScanNote).toBe(
+        "This skill needs network access to call the user's configured API.",
+      );
       expect(payload.acceptLicenseTerms).toBe(true);
       expect(payload.tags).toEqual(["latest"]);
       const files = publishForm.getAll("files") as Array<Blob & { name?: string }>;
-      expect(files.map((file) => String(file.name ?? "")).sort()).toEqual(["SKILL.md", "notes.md"]);
+      expect(files.map((file) => file.name ?? "").sort()).toEqual(["SKILL.md", "notes.md"]);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects oversized clawscan notes before uploading skill files", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "oversized-note");
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, "SKILL.md"), "# Skill\n", "utf8");
+
+      await expect(
+        cmdPublish(makeOpts(workdir), "oversized-note", {
+          slug: "oversized-note",
+          name: "Oversized Note",
+          version: "1.0.0",
+          clawscanNote: "x".repeat(MAX_CLAWSCAN_NOTE_CHARS + 1),
+        }),
+      ).rejects.toThrow(`ClawScan note must be at most ${MAX_CLAWSCAN_NOTE_CHARS} characters.`);
+      expect(httpMocks.apiRequestForm).not.toHaveBeenCalled();
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }
@@ -109,6 +135,79 @@ describe("cmdPublish", () => {
         expect.objectContaining({ path: "/api/v1/skills", method: "POST" }),
         expect.anything(),
       );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("still publishes a root SKILL.md hidden by broad ignore patterns", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "ignored-manifest");
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, ".gitignore"), "*.md\n", "utf8");
+      await writeFile(join(folder, "SKILL.md"), "# Skill\n", "utf8");
+      await writeFile(join(folder, "notes.md"), "ignored notes\n", "utf8");
+
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        skillId: "skill_1",
+        versionId: "ver_1",
+      });
+
+      await cmdPublish(makeOpts(workdir), "ignored-manifest", {
+        slug: "ignored-manifest",
+        name: "Ignored Manifest",
+        version: "1.0.0",
+        changelog: "",
+        tags: "latest",
+      });
+
+      const publishCall = httpMocks.apiRequestForm.mock.calls.find((call) => {
+        const req = call[1] as { path?: string } | undefined;
+        return req?.path === "/api/v1/skills";
+      });
+      if (!publishCall) throw new Error("Missing publish call");
+      const publishForm = (publishCall[1] as { form?: FormData }).form as FormData;
+      const files = publishForm.getAll("files") as Array<Blob & { name?: string }>;
+      expect(files.map((file) => file.name ?? "")).toEqual(["SKILL.md"]);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("includes owner handle for org-owned skill publishes", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "org-skill");
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, "SKILL.md"), "# Skill\n", "utf8");
+
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        skillId: "skill_1",
+        versionId: "ver_2",
+      });
+
+      await cmdPublish(makeOpts(workdir), "org-skill", {
+        owner: "@openclaw",
+        migrateOwner: true,
+        version: "1.0.1",
+        changelog: "",
+        tags: "latest",
+      });
+
+      const publishCall = httpMocks.apiRequestForm.mock.calls.find((call) => {
+        const req = call[1] as { path?: string } | undefined;
+        return req?.path === "/api/v1/skills";
+      });
+      if (!publishCall) throw new Error("Missing publish call");
+      const publishForm = (publishCall[1] as { form?: FormData }).form as FormData;
+      const payloadEntry = publishForm.get("payload");
+      if (typeof payloadEntry !== "string") throw new Error("Missing publish payload");
+      const payload = JSON.parse(payloadEntry);
+      expect(payload.ownerHandle).toBe("openclaw");
+      expect(payload.migrateOwner).toBe(true);
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }

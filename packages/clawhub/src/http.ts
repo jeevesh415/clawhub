@@ -32,12 +32,24 @@ const CURL_WRITE_OUT_FORMAT = [
 export type HttpRuntime = "node" | "bun";
 
 type RequestArgs =
-  | { method: "GET" | "POST" | "DELETE"; path: string; token?: string; body?: unknown }
-  | { method: "GET" | "POST" | "DELETE"; url: string; token?: string; body?: unknown };
+  | {
+      method: "GET" | "POST" | "DELETE";
+      path: string;
+      token?: string;
+      body?: unknown;
+      retryCount?: number;
+    }
+  | {
+      method: "GET" | "POST" | "DELETE";
+      url: string;
+      token?: string;
+      body?: unknown;
+      retryCount?: number;
+    };
 
 type FormRequestArgs =
-  | { method: "POST"; path: string; token?: string; form: FormData }
-  | { method: "POST"; url: string; token?: string; form: FormData };
+  | { method: "POST"; path: string; token?: string; form: FormData; retryCount?: number }
+  | { method: "POST"; url: string; token?: string; form: FormData; retryCount?: number };
 
 type TextRequestArgs = { path: string; token?: string } | { url: string; token?: string };
 
@@ -78,6 +90,7 @@ type HttpClient = {
   apiRequestForm<T>(registry: string, args: FormRequestArgs): Promise<T>;
   apiRequestForm<T>(registry: string, args: FormRequestArgs, schema: ArkValidator<T>): Promise<T>;
   fetchText(registry: string, args: TextRequestArgs): Promise<string>;
+  fetchBinary(registry: string, args: TextRequestArgs): Promise<Uint8Array>;
   downloadZip(
     registry: string,
     args: { slug: string; version?: string; token?: string },
@@ -151,7 +164,7 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
       const headers: Record<string, string> = { Accept: "application/json" };
       if (args.token) headers.Authorization = `Bearer ${args.token}`;
       let body: string | undefined;
-      if (args.method === "POST") {
+      if (args.body !== undefined || args.method === "POST") {
         headers["Content-Type"] = "application/json";
         body = JSON.stringify(args.body ?? {});
       }
@@ -169,7 +182,7 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         );
       }
       return (await response.json()) as unknown;
-    });
+    }, args.retryCount);
     if (schema) return parseArk(schema, json, "API response");
     return json as T;
   }
@@ -206,7 +219,7 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         );
       }
       return (await response.json()) as unknown;
-    });
+    }, args.retryCount);
     if (schema) return parseArk(schema, json, "API response");
     return json as T;
   }
@@ -226,6 +239,28 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         throwHttpStatusError(response.status, text, response.headers, deps.now);
       }
       return text;
+    });
+  }
+
+  async function fetchBinaryRequest(registry: string, args: TextRequestArgs): Promise<Uint8Array> {
+    const url = "url" in args ? args.url : registryUrl(args.path, registry).toString();
+    return await runWithRetries(async () => {
+      if (deps.runtime === "bun") {
+        return await fetchBinaryViaCurl(deps, url, args.token);
+      }
+
+      const headers: Record<string, string> = {};
+      if (args.token) headers.Authorization = `Bearer ${args.token}`;
+      const response = await fetchWithTimeout(deps, url, { method: "GET", headers });
+      if (!response.ok) {
+        throwHttpStatusError(
+          response.status,
+          await readResponseTextSafe(response),
+          response.headers,
+          deps.now,
+        );
+      }
+      return new Uint8Array(await response.arrayBuffer());
     });
   }
 
@@ -260,6 +295,7 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
     apiRequest,
     apiRequestForm,
     fetchText: fetchTextRequest,
+    fetchBinary: fetchBinaryRequest,
     downloadZip: downloadZipRequest,
   };
 }
@@ -321,6 +357,10 @@ export async function fetchText(registry: string, args: TextRequestArgs): Promis
   return await defaultHttpClient.fetchText(registry, args);
 }
 
+export async function fetchBinary(registry: string, args: TextRequestArgs): Promise<Uint8Array> {
+  return await defaultHttpClient.fetchBinary(registry, args);
+}
+
 export async function downloadZip(
   registry: string,
   args: { slug: string; version?: string; token?: string },
@@ -329,9 +369,12 @@ export async function downloadZip(
 }
 
 function createRetryRunner(deps: Pick<HttpClientDeps, "setTimeoutImpl" | "random" | "now">) {
-  return async function runWithRetries<T>(fn: () => Promise<T>): Promise<T> {
+  return async function runWithRetries<T>(
+    fn: () => Promise<T>,
+    retryCount = RETRY_COUNT,
+  ): Promise<T> {
     return await pRetry(fn, {
-      retries: RETRY_COUNT,
+      retries: retryCount,
       minTimeout: 0,
       maxTimeout: 0,
       factor: 1,
@@ -381,7 +424,7 @@ function getRetryDelayMs(attemptError: unknown, random: () => number): number {
     cause?: unknown;
     error?: unknown;
   };
-  const attemptNumber = Math.max(1, Number(failed.attemptNumber ?? 1));
+  const attemptNumber = Math.max(1, failed.attemptNumber ?? 1);
   const rootError = failed.cause ?? failed.error ?? attemptError;
   if (rootError instanceof HttpStatusError && rootError.rateLimit.retryAfterSeconds !== undefined) {
     return rootError.rateLimit.retryAfterSeconds * 1000 + jitterMs(RETRY_AFTER_JITTER_MS, random);
@@ -408,15 +451,16 @@ function throwHttpStatusError(
   now: () => number,
 ): never {
   const rateLimit = parseRateLimitInfo(headers, now);
+  const retryableTransientContention = isTransientConvexContention(text);
   const message = buildHttpErrorMessage(status, text, rateLimit);
-  if (status === 429 || status >= 500) {
+  if (status === 429 || status >= 500 || retryableTransientContention) {
     throw new HttpStatusError(status, message, rateLimit);
   }
   throw new AbortError(message);
 }
 
 function buildHttpErrorMessage(status: number, text: string, rateLimit: RateLimitInfo): string {
-  const base = text || `HTTP ${status}`;
+  const base = normalizeHttpErrorBody(status, text);
   const details: string[] = [];
   if (rateLimit.retryAfterSeconds !== undefined) {
     details.push(`retry in ${rateLimit.retryAfterSeconds}s`);
@@ -428,6 +472,41 @@ function buildHttpErrorMessage(status: number, text: string, rateLimit: RateLimi
     details.push(`reset in ${rateLimit.resetDelaySeconds}s`);
   }
   return details.length === 0 ? base : `${base} (${details.join(", ")})`;
+}
+
+function normalizeHttpErrorBody(status: number, text: string): string {
+  const body = text.trim();
+  const lowered = body.toLowerCase();
+  if (body && lowered !== "unauthorized" && lowered !== "forbidden") {
+    if (isTransientConvexContention(body)) {
+      return `Transient ClawHub write contention. The package artifact passed request validation; retrying usually succeeds. ${body}`;
+    }
+    if (status === 404 && lowered === "package not found") {
+      return "Package not found or not visible to this account.";
+    }
+    if (status === 404 && lowered === "skill not found") {
+      return "Skill not found or unavailable to this account.";
+    }
+    return body;
+  }
+  if (status === 401) {
+    return "Authentication failed. Run `clawhub login` again. Deleted, banned, or disabled ClawHub accounts cannot use API tokens.";
+  }
+  if (status === 403) {
+    return "Permission denied. This account does not have access to this operation, or the account is not in good standing.";
+  }
+  if (body) return body;
+  return `HTTP ${status}`;
+}
+
+function isTransientConvexContention(text: string) {
+  const lowered = text.toLowerCase();
+  return (
+    lowered.includes("optimistic concurrency") ||
+    lowered.includes("write conflict") ||
+    (lowered.includes('documents read from or written to the "') &&
+      lowered.includes("changed while this mutation was being run"))
+  );
 }
 
 function parseRateLimitInfo(headers: HeaderSource, now: () => number): RateLimitInfo {
@@ -523,7 +602,7 @@ async function fetchJsonViaCurl(
     ...headers,
     url,
   ];
-  if (args.method === "POST") {
+  if (args.body !== undefined || args.method === "POST") {
     curlArgs.push("-H", "Content-Type: application/json");
     curlArgs.push("--data-binary", JSON.stringify(args.body ?? {}));
   }
@@ -568,7 +647,7 @@ async function fetchJsonFormViaCurl(
         await deps.writeFileImpl(filePath, bytes);
         formArgs.push("-F", `${key}=@${filePath};filename=${filename}`);
       } else {
-        formArgs.push("-F", `${key}=${String(value)}`);
+        formArgs.push("-F", `${key}=${value}`);
       }
     }
 

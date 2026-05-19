@@ -40,7 +40,7 @@ export async function promptHidden(prompt: string) {
 export async function promptConfirm(prompt: string) {
   const answer = await confirm({ message: prompt });
   if (isCancel(answer)) return false;
-  return Boolean(answer);
+  return answer;
 }
 
 export function openInBrowser(url: string) {
@@ -48,7 +48,7 @@ export function openInBrowser(url: string) {
     process.platform === "darwin"
       ? ["open", url]
       : process.platform === "win32"
-        ? ["cmd", "/c", "start", "", url]
+        ? ["explorer", url]
         : ["xdg-open", url];
   const [command, ...commandArgs] = args;
   if (!command) return;
@@ -70,7 +70,7 @@ export function openInBrowser(url: string) {
 }
 
 export function isInteractive() {
-  return Boolean(process.stdout.isTTY && stdin.isTTY);
+  return process.stdout.isTTY && stdin.isTTY;
 }
 
 export function createSpinner(text: string) {

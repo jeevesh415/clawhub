@@ -7,6 +7,14 @@ import { isTextContentType, TEXT_FILE_EXTENSION_SET } from "./textFiles";
 describe("packages/clawhub schema textFiles", () => {
   it("exports text-file extension set", () => {
     expect(TEXT_FILE_EXTENSION_SET.has("md")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("r")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("ps1")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("psm1")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("psd1")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("tsv")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("conf")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("properties")).toBe(true);
+    expect(TEXT_FILE_EXTENSION_SET.has("dat")).toBe(true);
     expect(TEXT_FILE_EXTENSION_SET.has("exe")).toBe(false);
   });
 

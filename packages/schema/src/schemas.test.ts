@@ -2,8 +2,12 @@
 
 import { describe, expect, it } from "vitest";
 import { parseArk } from "./ark";
+import { MAX_CLAWSCAN_NOTE_CHARS, normalizeClawScanNote } from "./clawScanNote";
+import { DocsLinks, openClawDocsUrl } from "./docsLinks";
+import { getPackageScopeOwnerMismatch, inferPackageNameScope } from "./packages";
 import {
   ApiSearchResponseSchema,
+  ApiV1SearchResponseSchema,
   CliPublishRequestSchema,
   CliSkillDeleteRequestSchema,
   LockfileSchema,
@@ -14,10 +18,22 @@ describe("clawhub-schema", () => {
   it("parses lockfile records", () => {
     const lock = parseArk(
       LockfileSchema,
-      { version: 1, skills: { demo: { version: "1.0.0", installedAt: 123 } } },
+      {
+        version: 1,
+        skills: {
+          demo: {
+            version: "1.0.0",
+            installedAt: 123,
+            pinned: true,
+            pinReason: "scanner-flagged",
+          },
+        },
+      },
       "Lockfile",
     );
     expect(lock.skills.demo?.version).toBe("1.0.0");
+    expect(lock.skills.demo?.pinned).toBe(true);
+    expect(lock.skills.demo?.pinReason).toBe("scanner-flagged");
   });
 
   it("allows publish payload without tags", () => {
@@ -58,6 +74,53 @@ describe("clawhub-schema", () => {
       "Publish payload",
     );
     expect(payload.source?.repo).toBe("example/demo");
+  });
+
+  it("accepts publish payloads with an owner handle", () => {
+    const payload = parseArk(
+      CliPublishRequestSchema,
+      {
+        slug: "demo",
+        displayName: "Demo",
+        ownerHandle: "openclaw",
+        migrateOwner: true,
+        version: "1.0.0",
+        changelog: "",
+        files: [{ path: "SKILL.md", size: 1, storageId: "s", sha256: "x" }],
+      },
+      "Publish payload",
+    );
+    expect(payload.ownerHandle).toBe("openclaw");
+    expect(payload.migrateOwner).toBe(true);
+  });
+
+  it("normalizes ClawScan notes at the shared input boundary", () => {
+    expect(normalizeClawScanNote("  reviewer context  ")).toBe("reviewer context");
+    expect(normalizeClawScanNote("   ")).toBeUndefined();
+    expect(() => normalizeClawScanNote("x".repeat(MAX_CLAWSCAN_NOTE_CHARS + 1))).toThrow(
+      `ClawScan note must be at most ${MAX_CLAWSCAN_NOTE_CHARS} characters.`,
+    );
+  });
+
+  it("reports scoped package names that do not match the selected owner", () => {
+    expect(inferPackageNameScope("@openclaw/dronzer")).toBe("openclaw");
+    expect(getPackageScopeOwnerMismatch("@openclaw/dronzer", "openclaw")).toBeNull();
+    expect(getPackageScopeOwnerMismatch("@openclaw/dronzer", "@VintageAyu")).toEqual({
+      scope: "openclaw",
+      selectedOwner: "vintageayu",
+      suggestedName: "@vintageayu/dronzer",
+      message: `Package scope "@openclaw" must match selected owner "@vintageayu". Publish as "@openclaw" or rename this package to "@vintageayu/dronzer". More info: ${DocsLinks.clawhub.packageScopeFaq}`,
+    });
+  });
+
+  it("builds OpenClaw docs URLs from normalized paths", () => {
+    expect(openClawDocsUrl("/clawhub/publishing")).toBe(DocsLinks.clawhub.publishing);
+    expect(openClawDocsUrl("clawhub/publishing#package-scope-must-match-selected-owner")).toBe(
+      DocsLinks.clawhub.packageScopeFaq,
+    );
+    expect(openClawDocsUrl("plugins/sdk-setup#package-metadata")).toBe(
+      DocsLinks.openclaw.pluginPackageMetadata,
+    );
   });
 
   it("parses well-known config", () => {
@@ -126,9 +189,39 @@ describe("clawhub-schema", () => {
     expect(parsed.results[0]?.slug).toBe("a");
   });
 
+  it("parses v1 search owner metadata", () => {
+    const parsed = parseArk(
+      ApiV1SearchResponseSchema,
+      {
+        results: [
+          {
+            slug: "demo",
+            displayName: "Demo",
+            summary: null,
+            version: "1.0.0",
+            score: 1,
+            ownerHandle: "openclaw",
+            owner: {
+              handle: "openclaw",
+              displayName: "OpenClaw",
+              image: null,
+            },
+          },
+        ],
+      },
+      "Search",
+    );
+
+    expect(parsed.results[0]?.ownerHandle).toBe("openclaw");
+    expect(parsed.results[0]?.owner?.displayName).toBe("OpenClaw");
+  });
+
   it("parses delete request payload", () => {
-    expect(parseArk(CliSkillDeleteRequestSchema, { slug: "demo" }, "Delete")).toEqual({
+    expect(
+      parseArk(CliSkillDeleteRequestSchema, { slug: "demo", reason: "legal hold" }, "Delete"),
+    ).toEqual({
       slug: "demo",
+      reason: "legal hold",
     });
   });
 });

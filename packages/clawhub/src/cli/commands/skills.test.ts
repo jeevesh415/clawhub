@@ -63,17 +63,21 @@ const writeSkillOriginMock = vi.spyOn(skillStore, "writeSkillOrigin");
 const mkdirMock = fsMocks.mkdir;
 const rmMock = fsMocks.rm;
 const statMock = fsMocks.stat;
-const commandSkillsModuleSpecifier = "./skills.js?command-skills-test" as string;
-
 const {
   clampLimit,
   cmdExplore,
   cmdInstall,
+  cmdList,
+  cmdListSkillReports,
+  cmdPin,
+  cmdReportSkill,
   cmdSearch,
+  cmdTriageSkillReport,
   cmdUninstall,
+  cmdUnpin,
   cmdUpdate,
   formatExploreLine,
-} = (await import(commandSkillsModuleSpecifier)) as typeof import("./skills");
+} = await import("./skills.js");
 const {
   extractZipToDir,
   hashSkillFiles,
@@ -205,13 +209,16 @@ describe("cmdExplore", () => {
   it("supports all-time installs and trending sorts", async () => {
     mockApiRequest.mockResolvedValue({ items: [], nextCursor: null });
 
+    await cmdExplore(makeOpts(), { limit: 5, sort: "newest" });
     await cmdExplore(makeOpts(), { limit: 5, sort: "installsAllTime" });
     await cmdExplore(makeOpts(), { limit: 5, sort: "trending" });
 
     const first = new URL(String(mockApiRequest.mock.calls[0]?.[1]?.url));
     const second = new URL(String(mockApiRequest.mock.calls[1]?.[1]?.url));
-    expect(first.searchParams.get("sort")).toBe("installsAllTime");
-    expect(second.searchParams.get("sort")).toBe("trending");
+    const third = new URL(String(mockApiRequest.mock.calls[2]?.[1]?.url));
+    expect(first.searchParams.get("sort")).toBe("createdAt");
+    expect(second.searchParams.get("sort")).toBe("installsAllTime");
+    expect(third.searchParams.get("sort")).toBe("trending");
   });
 });
 
@@ -225,9 +232,204 @@ describe("cmdSearch", () => {
     const [, requestArgs] = mockApiRequest.mock.calls[0] ?? [];
     expect(requestArgs?.token).toBe("tkn");
   });
+
+  it("defaults limit to 25 when not specified", async () => {
+    mockGetOptionalAuthToken.mockResolvedValue(undefined);
+    mockApiRequest.mockResolvedValue({ results: [] });
+
+    await cmdSearch(makeOpts(), "stock price");
+
+    const [, requestArgs] = mockApiRequest.mock.calls[0] ?? [];
+    const url = new URL(String(requestArgs?.url));
+    expect(url.searchParams.get("limit")).toBe("25");
+  });
+
+  it("uses explicit limit when provided", async () => {
+    mockGetOptionalAuthToken.mockResolvedValue(undefined);
+    mockApiRequest.mockResolvedValue({ results: [] });
+
+    await cmdSearch(makeOpts(), "stock price", 5);
+
+    const [, requestArgs] = mockApiRequest.mock.calls[0] ?? [];
+    const url = new URL(String(requestArgs?.url));
+    expect(url.searchParams.get("limit")).toBe("5");
+  });
+
+  it("prints skill owners in search results", async () => {
+    mockGetOptionalAuthToken.mockResolvedValue(undefined);
+    mockApiRequest.mockResolvedValue({
+      results: [
+        {
+          slug: "demo",
+          displayName: "Demo Skill",
+          version: "1.2.3",
+          ownerHandle: "openclaw",
+          score: 0.9876,
+        },
+        {
+          slug: "legacy",
+          displayName: "Legacy Skill",
+          version: null,
+          owner: { displayName: "Legacy Owner" },
+          score: 0.5,
+        },
+      ],
+    });
+
+    await cmdSearch(makeOpts(), "demo");
+
+    expect(mockLog).toHaveBeenCalledWith("demo v1.2.3  @openclaw  Demo Skill  (0.988)");
+    expect(mockLog).toHaveBeenCalledWith("legacy  Legacy Owner  Legacy Skill  (0.500)");
+  });
+});
+
+describe("skill moderation commands", () => {
+  it("submits skill reports", async () => {
+    mockApiRequest.mockResolvedValueOnce({
+      ok: true,
+      reported: true,
+      alreadyReported: false,
+      reportId: "skillReports:1",
+      skillId: "skills:1",
+      reportCount: 1,
+    });
+
+    await cmdReportSkill(makeOpts(), "demo", { version: "1.0.0", reason: "suspicious files" });
+
+    expect(mockApiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/skills/demo/report",
+        token: "tkn",
+        body: { reason: "suspicious files", version: "1.0.0" },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("OK. Reported demo (skillReports:1).");
+  });
+
+  it("lists skill reports", async () => {
+    mockApiRequest.mockResolvedValueOnce({
+      items: [
+        {
+          reportId: "skillReports:1",
+          skillId: "skills:1",
+          skillVersionId: "skillVersions:1",
+          slug: "demo",
+          displayName: "Demo",
+          version: "1.0.0",
+          reason: "suspicious",
+          status: "open",
+          createdAt: 1,
+          reporter: { userId: "users:reporter", handle: "reporter", displayName: "Reporter" },
+          triagedAt: null,
+          triagedBy: null,
+          triageNote: null,
+        },
+      ],
+      nextCursor: null,
+      done: true,
+    });
+
+    await cmdListSkillReports(makeOpts(), { status: "open", limit: 10 });
+
+    const request = mockApiRequest.mock.calls[0]?.[1] as { url?: string } | undefined;
+    const url = new URL(String(request?.url));
+    expect(url.pathname).toBe("/api/v1/skills/-/reports");
+    expect(url.searchParams.get("status")).toBe("open");
+    expect(url.searchParams.get("limit")).toBe("10");
+    expect(mockLog).toHaveBeenCalledWith("skillReports:1 open demo");
+  });
+
+  it("triages skill reports", async () => {
+    mockApiRequest.mockResolvedValueOnce({
+      ok: true,
+      reportId: "skillReports:1",
+      skillId: "skills:1",
+      status: "confirmed",
+      reportCount: 0,
+      actionTaken: "hide",
+    });
+
+    await cmdTriageSkillReport(makeOpts(), "skillReports:1", {
+      status: "confirmed",
+      note: "handled",
+      action: "hide",
+      yes: true,
+    });
+
+    expect(mockApiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/skills/-/reports/skillReports%3A1/triage",
+        token: "tkn",
+        body: { status: "confirmed", note: "handled", finalAction: "hide" },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith(
+      "OK. Skill report skillReports:1 set to confirmed; action hide.",
+    );
+    expect(mockLog).toHaveBeenCalledWith("  - Hide the skill from public availability.");
+  });
 });
 
 describe("cmdUpdate", () => {
+  it("fails when directly updating a pinned skill", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: {
+        demo: { version: "0.1.0", installedAt: 123, pinned: true, pinReason: "hold" },
+      },
+    });
+
+    await expect(cmdUpdate(makeOpts(), "demo", { force: true }, false)).rejects.toThrow(
+      /is pinned/i,
+    );
+
+    expect(mockApiRequest).not.toHaveBeenCalled();
+    expect(mockDownloadZip).not.toHaveBeenCalled();
+  });
+
+  it("skips pinned skills during update --all and reports them in the summary", async () => {
+    mockApiRequest.mockResolvedValue({
+      latestVersion: { version: "2.0.0" },
+      moderation: null,
+    });
+    mockDownloadZip.mockResolvedValue(new Uint8Array([1, 2, 3]));
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: {
+        demo: { version: "0.1.0", installedAt: 123, pinned: true, pinReason: "hold" },
+        other: { version: "1.0.0", installedAt: 456 },
+      },
+    });
+    vi.mocked(writeLockfile).mockResolvedValue();
+    vi.mocked(readSkillOrigin).mockResolvedValue(null);
+    vi.mocked(writeSkillOrigin).mockResolvedValue();
+    vi.mocked(extractZipToDir).mockResolvedValue();
+    vi.mocked(listTextFiles).mockResolvedValue([]);
+    vi.mocked(hashSkillFiles).mockReturnValue({ fingerprint: "hash", files: [] });
+    vi.mocked(stat).mockRejectedValue(new Error("missing"));
+    vi.mocked(rm).mockResolvedValue();
+
+    await cmdUpdate(makeOpts(), undefined, { all: true }, false);
+
+    expect(mockApiRequest).toHaveBeenCalledTimes(1);
+    const [, args] = mockApiRequest.mock.calls[0] ?? [];
+    expect(args?.path).toBe(`${ApiRoutes.skills}/${encodeURIComponent("other")}`);
+    expect(writeLockfile).toHaveBeenCalledWith("/work", {
+      version: 1,
+      skills: {
+        demo: { version: "0.1.0", installedAt: 123, pinned: true, pinReason: "hold" },
+        other: { version: "2.0.0", installedAt: expect.any(Number) },
+      },
+    });
+    expect(mockLog).toHaveBeenCalledWith("Skipped 1 pinned skill: demo");
+  });
+
   it("uses path-based skill lookup when no local fingerprint is available", async () => {
     mockApiRequest.mockResolvedValue({ latestVersion: { version: "1.0.0" } });
     mockDownloadZip.mockResolvedValue(new Uint8Array([1, 2, 3]));
@@ -249,6 +451,137 @@ describe("cmdUpdate", () => {
     const [, args] = mockApiRequest.mock.calls[0] ?? [];
     expect(args?.path).toBe(`${ApiRoutes.skills}/${encodeURIComponent("demo")}`);
     expect(args?.url).toBeUndefined();
+  });
+
+  it("trusts the stored install fingerprint when the resolve endpoint cannot match", async () => {
+    mockApiRequest
+      .mockResolvedValueOnce({
+        latestVersion: { version: "2.0.0" },
+        moderation: null,
+      })
+      .mockResolvedValueOnce({
+        match: null,
+        latestVersion: { version: "2.0.0" },
+      });
+    mockDownloadZip.mockResolvedValue(new Uint8Array([1, 2, 3]));
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: { demo: { version: "1.0.0", installedAt: 123 } },
+    });
+    vi.mocked(readSkillOrigin).mockResolvedValue({
+      version: 1,
+      registry: "https://clawhub.ai",
+      slug: "demo",
+      installedVersion: "1.0.0",
+      installedAt: 123,
+      fingerprint: "hash",
+    });
+    vi.mocked(writeLockfile).mockResolvedValue();
+    vi.mocked(writeSkillOrigin).mockResolvedValue();
+    vi.mocked(extractZipToDir).mockResolvedValue();
+    vi.mocked(listTextFiles).mockResolvedValue([
+      { relPath: "SKILL.md", bytes: new Uint8Array([1]) },
+    ]);
+    vi.mocked(hashSkillFiles).mockReturnValue({ fingerprint: "hash", files: [] });
+    vi.mocked(stat).mockResolvedValue({} as unknown as Awaited<ReturnType<typeof stat>>);
+    vi.mocked(rm).mockResolvedValue();
+
+    await cmdUpdate(makeOpts(), "demo", {}, false);
+
+    expect(mockLog).not.toHaveBeenCalledWith(
+      "demo: local changes (no match). Use --force to overwrite.",
+    );
+    expect(mockDownloadZip).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      expect.objectContaining({ slug: "demo", version: "2.0.0" }),
+    );
+    expect(writeSkillOrigin).toHaveBeenCalledWith("/work/skills/demo", {
+      version: 1,
+      registry: "https://clawhub.ai",
+      slug: "demo",
+      installedVersion: "2.0.0",
+      installedAt: 123,
+      fingerprint: "hash",
+    });
+  });
+});
+
+describe("pin commands", () => {
+  it("pins an installed skill and preserves its version metadata", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: { demo: { version: "1.0.0", installedAt: 123 } },
+    });
+    vi.mocked(writeLockfile).mockResolvedValue();
+
+    await cmdPin(makeOpts(), "demo", { reason: "scanner hold" });
+
+    expect(writeLockfile).toHaveBeenCalledWith("/work", {
+      version: 1,
+      skills: {
+        demo: {
+          version: "1.0.0",
+          installedAt: 123,
+          pinned: true,
+          pinReason: "scanner hold",
+        },
+      },
+    });
+    expect(mockLog).toHaveBeenCalledWith("Pinned demo: scanner hold");
+  });
+
+  it("reports when an installed skill is already pinned without changes", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: {
+        demo: { version: "1.0.0", installedAt: 123, pinned: true, pinReason: "scanner hold" },
+      },
+    });
+
+    await cmdPin(makeOpts(), "demo");
+
+    expect(writeLockfile).not.toHaveBeenCalled();
+    expect(mockLog).toHaveBeenCalledWith('Skill "demo" is already pinned: scanner hold');
+  });
+
+  it("unpinned skills clear pin metadata and keep the installed version", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: {
+        demo: { version: "1.0.0", installedAt: 123, pinned: true, pinReason: "scanner hold" },
+      },
+    });
+    vi.mocked(writeLockfile).mockResolvedValue();
+
+    await cmdUnpin(makeOpts(), "demo");
+
+    expect(writeLockfile).toHaveBeenCalledWith("/work", {
+      version: 1,
+      skills: {
+        demo: {
+          version: "1.0.0",
+          installedAt: 123,
+        },
+      },
+    });
+    expect(mockLog).toHaveBeenCalledWith("Unpinned demo");
+  });
+});
+
+describe("cmdList", () => {
+  it("shows pinned state in list output", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: {
+        demo: { version: "1.0.0", installedAt: 123, pinned: true, pinReason: "scanner hold" },
+        other: { version: "2.0.0", installedAt: 456 },
+      },
+    });
+
+    await cmdList(makeOpts());
+
+    expect(mockLog).toHaveBeenCalledWith("demo  1.0.0  pinned (scanner hold)");
+    expect(mockLog).toHaveBeenCalledWith("other  2.0.0");
   });
 });
 
@@ -283,6 +616,21 @@ describe("cmdInstall", () => {
     expect(requestArgs?.token).toBe("tkn");
     const [, zipArgs] = mockDownloadZip.mock.calls[0] ?? [];
     expect(zipArgs?.token).toBe("tkn");
+  });
+
+  it("blocks force reinstall when a skill is pinned", async () => {
+    vi.mocked(readLockfile).mockResolvedValue({
+      version: 1,
+      skills: { demo: { version: "0.9.0", installedAt: 123, pinned: true, pinReason: "hold" } },
+    });
+    vi.mocked(stat).mockRejectedValue(new Error("missing"));
+
+    await expect(cmdInstall(makeOpts(), "demo", undefined, true)).rejects.toThrow(/is pinned/i);
+
+    expect(mockApiRequest).not.toHaveBeenCalled();
+    expect(mockDownloadZip).not.toHaveBeenCalled();
+    expect(rm).not.toHaveBeenCalled();
+    expect(writeLockfile).not.toHaveBeenCalled();
   });
 
   it("does not rm local directory when skill is malware-blocked (--force)", async () => {

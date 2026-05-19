@@ -1,10 +1,14 @@
-import { getAuthUserId } from "@convex-dev/auth/server";
+import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internalMutation, internalQuery, mutation, query } from "./functions";
-import { assertAdmin, requireUser } from "./lib/access";
+import { assertAdmin, getOptionalActiveAuthUserId, requireUser } from "./lib/access";
 import { toPublicPublisher } from "./lib/public";
+import {
+  formatReservedPublicOwnerHandleMessage,
+  isReservedPublicOwnerHandle,
+} from "./lib/publicRouteReservations";
 import {
   ensurePersonalPublisherForUser,
   getActiveUserByHandleOrPersonalPublisher,
@@ -15,14 +19,74 @@ import {
   isPublisherRoleAllowed,
   normalizePublisherHandle,
 } from "./lib/publishers";
+import { readCanonicalStat } from "./lib/skillStats";
 
 const PUBLISHER_HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+const MAX_PUBLIC_PUBLISHER_LIST_LIMIT = 500;
+const PUBLISHER_LIST_PREVIEW_LIMIT = 3;
+
+type PublisherListStats = {
+  skills: number;
+  packages: number;
+  installs: number;
+  downloads: number;
+  stars: number;
+};
+
+type PublisherPublishedItem = {
+  kind: "skill" | "plugin";
+  displayName: string;
+  downloads: number;
+};
+
+type PublisherCatalogItem = {
+  _id: Id<"skills"> | Id<"packages">;
+  kind: "skill" | "plugin";
+  displayName: string;
+  summary: string | null;
+  // Mirrors `skills.icon` for `kind: "skill"` items so the publisher
+  // profile catalog (`/p/<handle>`) can render the same custom glyph that
+  // `SkillCard` and `SkillListItem` show on `/skills` and `/search`.
+  // Always `null` for plugins in Phase 1.
+  icon: string | null;
+  href: string;
+  downloads: number;
+  stars: number;
+  updatedAt: number;
+};
+
+type PublisherCatalogSort = "downloads" | "recent";
+
+type PublisherListItem = NonNullable<ReturnType<typeof toPublicPublisher>> & {
+  stats: PublisherListStats;
+  publishedItems: PublisherPublishedItem[];
+  starredCount?: number;
+  affiliations?: Array<{
+    publisher: NonNullable<ReturnType<typeof toPublicPublisher>>;
+    role: Doc<"publisherMembers">["role"];
+  }>;
+};
+
+type PublisherListSummary = {
+  publisher: Doc<"publishers">;
+  item: PublisherListItem;
+};
+
+type PublicPublisherKindFilter = "user" | "org";
+type PublisherListCounts = {
+  all: number;
+  individuals: number;
+  organizations: number;
+};
 
 function validateHandle(rawHandle: string) {
   const handle = normalizePublisherHandle(rawHandle);
   if (!handle) throw new ConvexError("Handle is required");
   if (!PUBLISHER_HANDLE_PATTERN.test(handle)) {
     throw new ConvexError("Handle must be lowercase, url-safe, and 2-40 characters");
+  }
+  if (isReservedPublicOwnerHandle(handle)) {
+    throw new ConvexError(formatReservedPublicOwnerHandleMessage(handle));
   }
   return handle;
 }
@@ -39,6 +103,356 @@ function appendHandleSuffix(base: string, suffix: number) {
   const maxBaseLength = Math.max(2, 40 - suffixText.length);
   const trimmedBase = base.slice(0, maxBaseLength);
   return `${trimmedBase}${suffixText}`;
+}
+
+function clampInt(value: number, min: number, max: number) {
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function emptyPublisherListStats(): PublisherListStats {
+  return { skills: 0, packages: 0, installs: 0, downloads: 0, stars: 0 };
+}
+
+function hasPublisherStats(publisher: Doc<"publishers">) {
+  return (
+    typeof publisher.publishedSkills === "number" &&
+    typeof publisher.publishedPackages === "number" &&
+    typeof publisher.totalInstalls === "number" &&
+    typeof publisher.totalDownloads === "number" &&
+    typeof publisher.totalStars === "number"
+  );
+}
+
+function getPublisherDenormalizedStats(publisher: Doc<"publishers">): PublisherListStats {
+  return {
+    skills: publisher.publishedSkills ?? 0,
+    packages: publisher.publishedPackages ?? 0,
+    installs: publisher.totalInstalls ?? 0,
+    downloads: publisher.totalDownloads ?? 0,
+    stars: publisher.totalStars ?? 0,
+  };
+}
+
+type PublisherPublishedRows = {
+  skills: Doc<"skills">[];
+  packages: Doc<"packages">[];
+};
+
+async function getPublisherPublishedRows(
+  ctx: Pick<QueryCtx, "db">,
+  publisherId: Id<"publishers">,
+): Promise<PublisherPublishedRows> {
+  const [skills, packages] = await Promise.all([
+    ctx.db
+      .query("skills")
+      .withIndex("by_owner_publisher_active_updated", (q) =>
+        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
+      )
+      .collect(),
+    ctx.db
+      .query("packages")
+      .withIndex("by_owner_publisher_active_updated", (q) =>
+        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
+      )
+      .collect(),
+  ]);
+  return { skills, packages };
+}
+
+async function getPublisherPublishedPreviewRows(
+  ctx: Pick<QueryCtx, "db">,
+  publisherId: Id<"publishers">,
+): Promise<PublisherPublishedRows> {
+  const [skills, packages] = await Promise.all([
+    ctx.db
+      .query("skills")
+      .withIndex("by_owner_publisher_active_downloads", (q) =>
+        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
+      )
+      .order("desc")
+      .take(PUBLISHER_LIST_PREVIEW_LIMIT),
+    ctx.db
+      .query("packages")
+      .withIndex("by_owner_publisher_active_downloads", (q) =>
+        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
+      )
+      .order("desc")
+      .take(PUBLISHER_LIST_PREVIEW_LIMIT),
+  ]);
+  return { skills, packages };
+}
+
+function getIndexedPublisherStatsFromRows(rows: PublisherPublishedRows): PublisherListStats {
+  const stats = emptyPublisherListStats();
+
+  for (const skill of rows.skills) {
+    stats.skills += 1;
+    stats.installs += readCanonicalStat(skill, "installsAllTime");
+    stats.downloads += readCanonicalStat(skill, "downloads");
+    stats.stars += readCanonicalStat(skill, "stars");
+  }
+
+  for (const pkg of rows.packages) {
+    stats.packages += 1;
+    stats.installs += pkg.stats.installs;
+    stats.downloads += pkg.stats.downloads;
+    stats.stars += pkg.stats.stars;
+  }
+
+  return stats;
+}
+
+function getPublisherPublishedItems(rows: PublisherPublishedRows): PublisherPublishedItem[] {
+  return [
+    ...rows.skills.map((skill) => ({
+      kind: "skill" as const,
+      displayName: skill.displayName,
+      downloads: readCanonicalStat(skill, "downloads"),
+    })),
+    ...rows.packages.map((pkg) => ({
+      kind: pkg.family === "skill" ? ("skill" as const) : ("plugin" as const),
+      displayName: pkg.displayName,
+      downloads: pkg.stats.downloads,
+    })),
+  ]
+    .sort((a, b) => b.downloads - a.downloads || a.displayName.localeCompare(b.displayName))
+    .slice(0, 3);
+}
+
+function buildPluginDetailHref(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed.startsWith("@")) return `/plugins/${encodeURIComponent(trimmed)}`;
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex <= 1 || slashIndex === trimmed.length - 1) {
+    return `/plugins/${encodeURIComponent(trimmed)}`;
+  }
+  const scope = trimmed.slice(1, slashIndex);
+  const packageName = trimmed.slice(slashIndex + 1);
+  if (packageName.includes("/")) return `/plugins/${encodeURIComponent(trimmed)}`;
+  return `/plugins/@${encodeURIComponent(scope)}/${encodeURIComponent(packageName)}`;
+}
+
+function comparePublisherCatalogItems(sort: PublisherCatalogSort) {
+  return (a: PublisherCatalogItem, b: PublisherCatalogItem) => {
+    if (sort === "recent") {
+      return (
+        b.updatedAt - a.updatedAt ||
+        b.downloads - a.downloads ||
+        b.stars - a.stars ||
+        a.displayName.localeCompare(b.displayName)
+      );
+    }
+
+    return (
+      b.downloads - a.downloads ||
+      b.stars - a.stars ||
+      b.updatedAt - a.updatedAt ||
+      a.displayName.localeCompare(b.displayName)
+    );
+  };
+}
+
+function getPublisherCatalogItems(
+  publisher: Doc<"publishers">,
+  rows: PublisherPublishedRows,
+  sort: PublisherCatalogSort = "downloads",
+): PublisherCatalogItem[] {
+  return [
+    ...rows.skills.map((skill) => ({
+      _id: skill._id,
+      kind: "skill" as const,
+      displayName: skill.displayName,
+      summary: skill.summary ?? null,
+      icon: skill.icon ?? null,
+      href: `/${encodeURIComponent(publisher.handle)}/${encodeURIComponent(skill.slug)}`,
+      downloads: readCanonicalStat(skill, "downloads"),
+      stars: readCanonicalStat(skill, "stars"),
+      updatedAt: skill.updatedAt,
+    })),
+    ...rows.packages.map((pkg) => ({
+      _id: pkg._id,
+      kind: "plugin" as const,
+      displayName: pkg.displayName,
+      summary: pkg.summary ?? null,
+      icon: null,
+      href: buildPluginDetailHref(pkg.name),
+      downloads: pkg.stats.downloads,
+      stars: pkg.stats.stars,
+      updatedAt: pkg.updatedAt,
+    })),
+  ].sort(comparePublisherCatalogItems(sort));
+}
+
+async function toPublisherListItem(
+  ctx: Pick<QueryCtx, "db">,
+  publisher: Doc<"publishers">,
+  options: {
+    forceComputedStats?: boolean;
+    includePublishedItems?: boolean;
+    includeAffiliations?: boolean;
+    includeStarredCount?: boolean;
+  } = {},
+): Promise<PublisherListItem | null> {
+  const publicPublisher = toPublicPublisher(publisher);
+  if (!publicPublisher) return null;
+  const linkedUser =
+    publisher.kind === "user" && publisher.linkedUserId
+      ? await ctx.db.get(publisher.linkedUserId)
+      : null;
+  let publishedRows: PublisherPublishedRows | null = null;
+  const getRows = async () => {
+    publishedRows ??= await getPublisherPublishedRows(ctx, publisher._id);
+    return publishedRows;
+  };
+  const getPreviewRows = async () =>
+    publishedRows ?? (await getPublisherPublishedPreviewRows(ctx, publisher._id));
+  const stats =
+    !options.forceComputedStats && hasPublisherStats(publisher)
+      ? getPublisherDenormalizedStats(publisher)
+      : getIndexedPublisherStatsFromRows(await getRows());
+  const publishedItems = options.includePublishedItems
+    ? getPublisherPublishedItems(await getPreviewRows())
+    : [];
+  const affiliations =
+    options.includeAffiliations && publisher.kind === "user" && publisher.linkedUserId
+      ? await getUserPublisherAffiliations(ctx, publisher.linkedUserId, publisher._id)
+      : undefined;
+  const starredCount =
+    options.includeStarredCount && publisher.kind === "user" && publisher.linkedUserId
+      ? await getUserStarredCount(ctx, publisher.linkedUserId)
+      : undefined;
+  return {
+    ...publicPublisher,
+    image: publicPublisher.image ?? linkedUser?.image,
+    bio: publicPublisher.bio ?? linkedUser?.bio,
+    stats,
+    publishedItems,
+    ...(starredCount !== undefined ? { starredCount } : {}),
+    ...(affiliations ? { affiliations } : {}),
+  };
+}
+
+function toPublisherListSummary(publisher: Doc<"publishers">): PublisherListSummary | null {
+  const publicPublisher = toPublicPublisher(publisher);
+  if (!publicPublisher) return null;
+  return {
+    publisher,
+    item: {
+      ...publicPublisher,
+      stats: getPublisherDenormalizedStats(publisher),
+      publishedItems: [],
+    },
+  };
+}
+
+function hasPublisherListContent(summary: PublisherListSummary) {
+  if (!hasPublisherStats(summary.publisher)) return true;
+  return summary.item.stats.skills + summary.item.stats.packages > 0;
+}
+
+async function hydratePublisherListSummaries(
+  ctx: Pick<QueryCtx, "db">,
+  summaries: PublisherListSummary[],
+) {
+  const items = await Promise.all(
+    summaries.map((summary) =>
+      toPublisherListItem(ctx, summary.publisher, { includePublishedItems: true }),
+    ),
+  );
+  return items
+    .filter((item): item is PublisherListItem => Boolean(item))
+    .filter((item) => item.stats.skills + item.stats.packages > 0);
+}
+
+async function getUserStarredCount(ctx: Pick<QueryCtx, "db">, userId: Id<"users">) {
+  return (
+    await ctx.db
+      .query("stars")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect()
+  ).length;
+}
+
+async function getUserPublisherAffiliations(
+  ctx: Pick<QueryCtx, "db">,
+  userId: Id<"users">,
+  currentPublisherId: Id<"publishers">,
+) {
+  const memberships = await ctx.db
+    .query("publisherMembers")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .collect();
+  const items = await Promise.all(
+    memberships.map(async (membership) => {
+      if (membership.publisherId === currentPublisherId) return null;
+      const publisher = await ctx.db.get(membership.publisherId);
+      if (
+        !publisher ||
+        publisher.kind !== "org" ||
+        publisher.deletedAt ||
+        publisher.deactivatedAt
+      ) {
+        return null;
+      }
+      const publicPublisher = toPublicPublisher(publisher);
+      if (!publicPublisher) return null;
+      return {
+        publisher: publicPublisher,
+        role: membership.role,
+      };
+    }),
+  );
+  return items.filter(
+    (
+      item,
+    ): item is {
+      publisher: NonNullable<ReturnType<typeof toPublicPublisher>>;
+      role: Doc<"publisherMembers">["role"];
+    } => Boolean(item),
+  );
+}
+
+async function toPublicPublisherWithLinkedImage(
+  ctx: Pick<QueryCtx, "db">,
+  publisher: Doc<"publishers"> | null,
+) {
+  const item = publisher ? await toPublisherListItem(ctx, publisher) : null;
+  if (!item) return null;
+  const { stats: _stats, ...publicPublisher } = item;
+  return publicPublisher;
+}
+
+function comparePublisherListItems(a: PublisherListItem, b: PublisherListItem) {
+  const aPublishedCount = a.stats.skills + a.stats.packages;
+  const bPublishedCount = b.stats.skills + b.stats.packages;
+
+  return (
+    b.stats.downloads - a.stats.downloads ||
+    b.stats.stars - a.stats.stars ||
+    bPublishedCount - aPublishedCount ||
+    a.displayName.localeCompare(b.displayName)
+  );
+}
+
+function matchesPublisherQuery(publisher: PublisherListItem, queryText: string) {
+  if (!queryText) return true;
+  const haystack =
+    `${publisher.displayName} ${publisher.handle} ${publisher.bio ?? ""}`.toLowerCase();
+  return haystack.includes(queryText);
+}
+
+function getPublisherListCounts(items: PublisherListItem[]): PublisherListCounts {
+  const individualCount = items.filter((publisher) => publisher.kind === "user").length;
+  const organizationCount = items.filter((publisher) => publisher.kind === "org").length;
+  return {
+    all: individualCount + organizationCount,
+    individuals: individualCount,
+    organizations: organizationCount,
+  };
+}
+
+function getPublisherListSummaryCounts(summaries: PublisherListSummary[]): PublisherListCounts {
+  return getPublisherListCounts(summaries.map((summary) => summary.item));
 }
 
 async function resolveAvailableUserHandle(
@@ -172,7 +586,10 @@ async function migrateLegacyPublisherHandleToOrgWithActor(
     });
   }
 
-  const ensuredPersonalPublisher = await ensurePersonalPublisherForUser(ctx, nextLegacyUser);
+  const ensuredPersonalPublisher = await ensurePersonalPublisherForUser(ctx, nextLegacyUser, {
+    actorUserId: args.actorUserId,
+    source: "publisher.legacy_handle.migrate",
+  });
 
   const packages = await ctx.db
     .query("packages")
@@ -347,7 +764,10 @@ export const ensurePersonalPublisherInternal = internalMutation({
   handler: async (ctx, args) => {
     const user = await ctx.db.get(args.userId);
     if (!user || user.deletedAt || user.deactivatedAt) return null;
-    return await ensurePersonalPublisherForUser(ctx, user);
+    return await ensurePersonalPublisherForUser(ctx, user, {
+      actorUserId: user._id,
+      source: "publisher.ensure_personal_internal",
+    });
   },
 });
 
@@ -364,7 +784,10 @@ export const resolvePublishTargetForUserInternal = internalMutation({
     if (!actor || actor.deletedAt || actor.deactivatedAt) throw new ConvexError("Unauthorized");
     const minimumRole = args.minimumRole ?? "publisher";
     const requestedHandle = normalizePublisherHandle(args.ownerHandle);
-    const personal = await ensurePersonalPublisherForUser(ctx, actor);
+    const personal = await ensurePersonalPublisherForUser(ctx, actor, {
+      actorUserId: actor._id,
+      source: "publisher.resolve_target",
+    });
     if (!personal) throw new ConvexError("Personal publisher not found");
     if (!requestedHandle) {
       return {
@@ -386,11 +809,15 @@ export const resolvePublishTargetForUserInternal = internalMutation({
 
     const publisher = await getPublisherByHandle(ctx, requestedHandle);
     if (!publisher || publisher.deletedAt || publisher.deactivatedAt) {
-      throw new ConvexError(`Publisher "@${requestedHandle}" not found`);
+      throw new ConvexError(
+        `Publisher "@${requestedHandle}" not found. Create the "@${requestedHandle}" organization on ClawHub or choose a different owner.`,
+      );
     }
     const membership = await getPublisherMembership(ctx, publisher._id, actor._id);
     if (!membership || !isPublisherRoleAllowed(membership.role, [minimumRole])) {
-      throw new ConvexError(`Forbidden for "@${requestedHandle}"`);
+      throw new ConvexError(
+        `You do not have publish access for "@${requestedHandle}". Ask an owner or admin of "@${requestedHandle}" to add you.`,
+      );
     }
     return {
       publisherId: publisher._id,
@@ -404,7 +831,7 @@ export const resolvePublishTargetForUserInternal = internalMutation({
 export const listMine = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await getAuthUserId(ctx);
+    const userId = await getOptionalActiveAuthUserId(ctx);
     if (!userId) return [];
     const user = await ctx.db.get(userId);
     if (!user || user.deletedAt || user.deactivatedAt) return [];
@@ -449,7 +876,238 @@ export const listMine = query({
 
 export const getByHandle = query({
   args: { handle: v.string() },
-  handler: async (ctx, args) => toPublicPublisher(await getPublisherByHandle(ctx, args.handle)),
+  handler: async (ctx, args) =>
+    await toPublicPublisherWithLinkedImage(ctx, await getPublisherByHandle(ctx, args.handle)),
+});
+
+export const getProfileByHandle = query({
+  args: { handle: v.string() },
+  handler: async (ctx, args) => {
+    const publisher = await getPublisherByHandle(ctx, args.handle);
+    if (!publisher || publisher.deletedAt || publisher.deactivatedAt) return null;
+    return await toPublisherListItem(ctx, publisher, {
+      forceComputedStats: true,
+      includeAffiliations: true,
+      includePublishedItems: true,
+      includeStarredCount: true,
+    });
+  },
+});
+
+export const listStarredPage = query({
+  args: {
+    handle: v.string(),
+    sort: v.optional(v.union(v.literal("downloads"), v.literal("recent"))),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const publisher = await getPublisherByHandle(ctx, args.handle);
+    if (
+      !publisher ||
+      publisher.kind !== "user" ||
+      !publisher.linkedUserId ||
+      publisher.deletedAt ||
+      publisher.deactivatedAt
+    ) {
+      return { page: [], continueCursor: "", isDone: true };
+    }
+
+    const linkedUserId = publisher.linkedUserId;
+    const numItems = clampInt(args.paginationOpts.numItems, 1, 24);
+    const offset = args.paginationOpts.cursor ? Number(args.paginationOpts.cursor) : 0;
+    const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0;
+    const starRows = await ctx.db
+      .query("stars")
+      .withIndex("by_user", (q) => q.eq("userId", linkedUserId))
+      .order("desc")
+      .collect();
+
+    const items = (
+      await Promise.all(
+        starRows.map(async (star): Promise<PublisherCatalogItem | null> => {
+          const skill = await ctx.db.get(star.skillId);
+          if (!skill || skill.softDeletedAt) return null;
+          const ownerPublisher = skill.ownerPublisherId
+            ? await ctx.db.get(skill.ownerPublisherId)
+            : null;
+          const ownerHandle =
+            ownerPublisher && !ownerPublisher.deletedAt && !ownerPublisher.deactivatedAt
+              ? ownerPublisher.handle
+              : String(skill.ownerUserId);
+          return {
+            _id: skill._id,
+            kind: "skill" as const,
+            displayName: skill.displayName,
+            summary: skill.summary ?? null,
+            icon: skill.icon ?? null,
+            href: `/${encodeURIComponent(ownerHandle)}/${encodeURIComponent(skill.slug)}`,
+            downloads: readCanonicalStat(skill, "downloads"),
+            stars: readCanonicalStat(skill, "stars"),
+            updatedAt: skill.updatedAt,
+          };
+        }),
+      )
+    )
+      .filter((item): item is PublisherCatalogItem => Boolean(item))
+      .sort(comparePublisherCatalogItems(args.sort ?? "downloads"));
+    const nextOffset = safeOffset + numItems;
+    const page = items.slice(safeOffset, nextOffset);
+
+    return {
+      page,
+      continueCursor: nextOffset < items.length ? String(nextOffset) : "",
+      isDone: nextOffset >= items.length,
+    };
+  },
+});
+
+export const listPublishedPage = query({
+  args: {
+    handle: v.string(),
+    kind: v.optional(v.union(v.literal("skill"), v.literal("plugin"))),
+    sort: v.optional(v.union(v.literal("downloads"), v.literal("recent"))),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const publisher = await getPublisherByHandle(ctx, args.handle);
+    if (!publisher || publisher.deletedAt || publisher.deactivatedAt) {
+      return { page: [], continueCursor: "", isDone: true };
+    }
+
+    const numItems = clampInt(args.paginationOpts.numItems, 1, 24);
+    const offset = args.paginationOpts.cursor ? Number(args.paginationOpts.cursor) : 0;
+    const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0;
+    const items = getPublisherCatalogItems(
+      publisher,
+      await getPublisherPublishedRows(ctx, publisher._id),
+      args.sort ?? "downloads",
+    ).filter((item) => !args.kind || item.kind === args.kind);
+    const nextOffset = safeOffset + numItems;
+    const page = items.slice(safeOffset, nextOffset);
+
+    return {
+      page,
+      continueCursor: nextOffset < items.length ? String(nextOffset) : "",
+      isDone: nextOffset >= items.length,
+    };
+  },
+});
+
+export const listPublic = query({
+  args: {
+    limit: v.optional(v.number()),
+    kind: v.optional(v.union(v.literal("user"), v.literal("org"))),
+  },
+  handler: async (ctx, args) => {
+    const limit = clampInt(
+      args.limit ?? MAX_PUBLIC_PUBLISHER_LIST_LIMIT,
+      1,
+      MAX_PUBLIC_PUBLISHER_LIST_LIMIT,
+    );
+    const kindFilter = args.kind as PublicPublisherKindFilter | undefined;
+    const activeRows = await ctx.db
+      .query("publishers")
+      .withIndex("by_active_total_downloads", (q) =>
+        q.eq("deletedAt", undefined).eq("deactivatedAt", undefined),
+      )
+      .order("desc")
+      .collect();
+    const publisherItems = (
+      await Promise.all(
+        activeRows.map((publisher) =>
+          toPublisherListItem(ctx, publisher, { includePublishedItems: true }),
+        ),
+      )
+    )
+      .filter((item): item is PublisherListItem => Boolean(item))
+      .filter((item) => item.stats.skills + item.stats.packages > 0);
+    const activePublishers = publisherItems.filter((publisher) => {
+      if (!kindFilter) return true;
+      return publisher.kind === kindFilter;
+    });
+    const items = activePublishers.sort(comparePublisherListItems).slice(0, limit);
+
+    return {
+      items,
+      total: activePublishers.length,
+      counts: {
+        all: publisherItems.length,
+        individuals: publisherItems.filter((publisher) => publisher.kind === "user").length,
+        organizations: publisherItems.filter((publisher) => publisher.kind === "org").length,
+      },
+      limit,
+    };
+  },
+});
+
+export const listPublicPage = query({
+  args: {
+    kind: v.optional(v.union(v.literal("user"), v.literal("org"))),
+    query: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const kindFilter = args.kind as PublicPublisherKindFilter | undefined;
+    const numItems = clampInt(args.paginationOpts.numItems, 1, 50);
+    const queryText = args.query?.trim();
+    const offset = args.paginationOpts.cursor ? Number(args.paginationOpts.cursor) : 0;
+    const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0;
+    const activeRows = kindFilter
+      ? await ctx.db
+          .query("publishers")
+          .withIndex("by_active_kind_total_downloads", (q) =>
+            q.eq("deletedAt", undefined).eq("deactivatedAt", undefined).eq("kind", kindFilter),
+          )
+          .order("desc")
+          .take(MAX_PUBLIC_PUBLISHER_LIST_LIMIT)
+      : await ctx.db
+          .query("publishers")
+          .withIndex("by_active_total_downloads", (q) =>
+            q.eq("deletedAt", undefined).eq("deactivatedAt", undefined),
+          )
+          .order("desc")
+          .take(MAX_PUBLIC_PUBLISHER_LIST_LIMIT);
+    const publisherSummaries = activeRows
+      .map(toPublisherListSummary)
+      .filter((summary): summary is PublisherListSummary => Boolean(summary))
+      .filter(hasPublisherListContent);
+    const itemSummaries = publisherSummaries
+      .filter(
+        (summary) =>
+          (!kindFilter || summary.item.kind === kindFilter) &&
+          matchesPublisherQuery(summary.item, queryText?.toLowerCase() ?? ""),
+      )
+      .sort((a, b) => comparePublisherListItems(a.item, b.item));
+    const globalPublisherSummaries = kindFilter
+      ? (
+          await ctx.db
+            .query("publishers")
+            .withIndex("by_active_total_downloads", (q) =>
+              q.eq("deletedAt", undefined).eq("deactivatedAt", undefined),
+            )
+            .order("desc")
+            .take(MAX_PUBLIC_PUBLISHER_LIST_LIMIT)
+        )
+          .map(toPublisherListSummary)
+          .filter((summary): summary is PublisherListSummary => Boolean(summary))
+          .filter(hasPublisherListContent)
+      : publisherSummaries;
+    const globalCounts = getPublisherListSummaryCounts(globalPublisherSummaries);
+    const counts = queryText ? getPublisherListSummaryCounts(itemSummaries) : globalCounts;
+    const nextOffset = safeOffset + numItems;
+    const page = await hydratePublisherListSummaries(
+      ctx,
+      itemSummaries.slice(safeOffset, nextOffset),
+    );
+
+    return {
+      page,
+      counts,
+      globalCounts,
+      continueCursor: nextOffset < itemSummaries.length ? String(nextOffset) : "",
+      isDone: nextOffset >= itemSummaries.length,
+    };
+  },
 });
 
 export const listMembers = query({
@@ -491,7 +1149,10 @@ export const createOrg = mutation({
   },
   handler: async (ctx, args) => {
     const { user, userId } = await requireUser(ctx);
-    await ensurePersonalPublisherForUser(ctx, user);
+    await ensurePersonalPublisherForUser(ctx, user, {
+      actorUserId: userId,
+      source: "publisher.create_org",
+    });
 
     const handle = validateHandle(args.handle);
     const existingPublisher = await getPublisherByHandle(ctx, handle);
@@ -506,11 +1167,13 @@ export const createOrg = mutation({
     }
 
     const now = Date.now();
+    const displayName = args.displayName.trim() || handle;
+    const bio = args.bio?.trim() || undefined;
     const publisherId = await ctx.db.insert("publishers", {
       kind: "org",
       handle,
-      displayName: args.displayName.trim() || handle,
-      bio: args.bio?.trim() || undefined,
+      displayName,
+      bio,
       image: undefined,
       linkedUserId: undefined,
       trustedPublisher: false,
@@ -654,7 +1317,10 @@ export const addMember = mutation({
     if (!targetUser) {
       throw new ConvexError(`User "@${handle}" not found`);
     }
-    await ensurePersonalPublisherForUser(ctx, targetUser);
+    await ensurePersonalPublisherForUser(ctx, targetUser, {
+      actorUserId: userId,
+      source: "publisher.member.upsert",
+    });
     const existing = await getPublisherMembership(ctx, publisher._id, targetUser._id);
     const now = Date.now();
     if (existing) {
@@ -739,9 +1405,23 @@ export const setTrustedPublisherInternal = internalMutation({
     const actor = await ctx.db.get(args.actorUserId);
     if (!actor || actor.deletedAt || actor.deactivatedAt) throw new ConvexError("Unauthorized");
     assertAdmin(actor);
+    const publisher = await ctx.db.get(args.publisherId);
+    const now = Date.now();
     await ctx.db.patch(args.publisherId, {
       trustedPublisher: args.trustedPublisher,
-      updatedAt: Date.now(),
+      updatedAt: now,
+    });
+    await ctx.db.insert("auditLogs", {
+      actorUserId: args.actorUserId,
+      action: args.trustedPublisher ? "publisher.trusted.set" : "publisher.trusted.unset",
+      targetType: "publisher",
+      targetId: args.publisherId,
+      metadata: {
+        handle: publisher?.handle ?? null,
+        previousTrustedPublisher: publisher?.trustedPublisher ?? null,
+        trustedPublisher: args.trustedPublisher,
+      },
+      createdAt: now,
     });
   },
 });

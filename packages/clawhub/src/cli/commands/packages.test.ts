@@ -1,9 +1,11 @@
 /* @vitest-environment node */
 
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAuthTokenModuleMocks,
@@ -12,6 +14,7 @@ import {
   createUiModuleMocks,
   makeGlobalOpts,
 } from "../../../test/cliCommandTestKit.js";
+import { MAX_CLAWSCAN_NOTE_CHARS } from "../../schema/index.js";
 
 const authTokenMocks = createAuthTokenModuleMocks();
 const registryMocks = createRegistryModuleMocks();
@@ -26,13 +29,33 @@ vi.mock("../authToken.js", () => authTokenMocks.moduleFactory());
 vi.mock("../ui.js", () => uiMocks.moduleFactory());
 
 const {
-  cmdDeletePackageTrustedPublisher,
+  cmdDeletePackage,
+  cmdDownloadPackage,
   cmdExplorePackages,
   cmdGetPackageTrustedPublisher,
   cmdInspectPackage,
+  cmdPackageModerationStatus,
+  cmdPackageMigrationStatus,
+  cmdPackageReadiness,
+  cmdPackPackage,
   cmdPublishPackage,
-  cmdSetPackageTrustedPublisher,
+  cmdReportPackage,
+  cmdTransferPackage,
+  cmdUndeletePackage,
+  cmdVerifyPackage,
 } = await import("./packages");
+const {
+  cmdBackfillPackageArtifacts,
+  cmdDeletePackageTrustedPublisher,
+  cmdListPackageMigrations,
+  cmdListPackageReports,
+  cmdModeratePackageRelease,
+  cmdPackageModerationQueue,
+  cmdSetPackageTrustedPublisher,
+  cmdTriagePackageReport,
+  cmdUpsertPackageMigration,
+} = await import("../../../../clawhub-mod/src/commands/packages");
+const { parseClawPack } = await import("../../clawpack");
 
 const mockLog = vi.spyOn(console, "log").mockImplementation(() => {});
 const mockWrite = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -77,14 +100,28 @@ function getPublishPayload() {
 function getUploadedFileNames() {
   const form = getPublishForm();
   return (form.getAll("files") as Array<Blob & { name?: string }>)
-    .map((file) => String(file.name ?? ""))
+    .map((file) => file.name ?? "")
     .sort();
+}
+
+function getUploadedClawPackNames() {
+  const form = getPublishForm();
+  return (form.getAll("clawpack") as Array<Blob & { name?: string }>)
+    .map((file) => file.name ?? "")
+    .sort();
+}
+
+function getUploadedClawPacks() {
+  const form = getPublishForm();
+  return form.getAll("clawpack") as Array<Blob & { name?: string }>;
 }
 
 function makeCodePluginPackageJson(overrides: Record<string, unknown>) {
   return JSON.stringify({
     openclaw: {
       extensions: ["./dist/index.js"],
+      hostTargets: ["darwin-arm64", "linux-x64", "win32-x64"],
+      environment: {},
       compat: {
         pluginApi: ">=2026.3.24-beta.2",
       },
@@ -94,6 +131,65 @@ function makeCodePluginPackageJson(overrides: Record<string, unknown>) {
     },
     ...overrides,
   });
+}
+
+const TAR_BLOCK_SIZE = 512;
+
+function writeTarString(target: Uint8Array, offset: number, width: number, value: string) {
+  const encoded = new TextEncoder().encode(value);
+  target.set(encoded.subarray(0, width), offset);
+}
+
+function tarOctal(value: number, width: number) {
+  return value.toString(8).padStart(width - 1, "0") + "\0";
+}
+
+function tarFile(path: string, content: string) {
+  const bytes = new TextEncoder().encode(content);
+  const header = new Uint8Array(TAR_BLOCK_SIZE);
+  writeTarString(header, 0, 100, path);
+  writeTarString(header, 100, 8, tarOctal(0o644, 8));
+  writeTarString(header, 108, 8, tarOctal(0, 8));
+  writeTarString(header, 116, 8, tarOctal(0, 8));
+  writeTarString(header, 124, 12, tarOctal(bytes.byteLength, 12));
+  writeTarString(header, 136, 12, tarOctal(0, 12));
+  header.fill(0x20, 148, 156);
+  header[156] = "0".charCodeAt(0);
+  writeTarString(header, 257, 6, "ustar");
+  writeTarString(header, 263, 2, "00");
+
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  writeTarString(header, 148, 8, tarOctal(checksum, 8));
+
+  const paddedSize = Math.ceil(bytes.byteLength / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+  const body = new Uint8Array(paddedSize);
+  body.set(bytes);
+  return [header, body];
+}
+
+function npmPackFixture(files: Record<string, string>) {
+  const parts: Uint8Array[] = [];
+  for (const [path, content] of Object.entries(files)) {
+    parts.push(...tarFile(path, content));
+  }
+  parts.push(new Uint8Array(TAR_BLOCK_SIZE), new Uint8Array(TAR_BLOCK_SIZE));
+  const size = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const tar = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    tar.set(part, offset);
+    offset += part.byteLength;
+  }
+  return gzipSync(tar);
+}
+
+function artifactIdentity(bytes: Uint8Array) {
+  return {
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    npmIntegrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
+    npmShasum: createHash("sha1").update(bytes).digest("hex"),
+  };
 }
 
 afterEach(() => {
@@ -136,6 +232,11 @@ describe("package commands", () => {
     await cmdExplorePackages(makeOpts(), "demo plugin", {
       family: "code-plugin",
       executesCode: true,
+      os: "darwin",
+      requiresBrowser: true,
+      externalService: "GitHub",
+      artifactKind: "npm-pack",
+      npmMirror: true,
     });
 
     const request = httpMocks.apiRequest.mock.calls[0]?.[1] as { url?: string } | undefined;
@@ -144,6 +245,11 @@ describe("package commands", () => {
     expect(url.searchParams.get("q")).toBe("demo plugin");
     expect(url.searchParams.get("family")).toBe("code-plugin");
     expect(url.searchParams.get("executesCode")).toBe("true");
+    expect(url.searchParams.get("os")).toBe("darwin");
+    expect(url.searchParams.get("requiresBrowser")).toBe("true");
+    expect(url.searchParams.get("externalService")).toBe("GitHub");
+    expect(url.searchParams.get("artifactKind")).toBe("npm-pack");
+    expect(url.searchParams.get("npmMirror")).toBe("true");
   });
 
   it("supports skill family package browse requests", async () => {
@@ -152,12 +258,13 @@ describe("package commands", () => {
       nextCursor: null,
     });
 
-    await cmdExplorePackages(makeOpts(), "", { family: "skill", limit: 7 });
+    await cmdExplorePackages(makeOpts(), "", { family: "skill", target: "linux-x64", limit: 7 });
 
     const request = httpMocks.apiRequest.mock.calls[0]?.[1] as { url?: string } | undefined;
     const url = new URL(String(request?.url));
     expect(url.pathname).toBe("/api/v1/packages");
     expect(url.searchParams.get("family")).toBe("skill");
+    expect(url.searchParams.get("target")).toBe("linux-x64");
     expect(url.searchParams.get("limit")).toBe("7");
   });
 
@@ -206,6 +313,669 @@ describe("package commands", () => {
     expect(url.searchParams.get("version")).toBeNull();
   });
 
+  it("downloads a ClawPack artifact through the explicit artifact resolver", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const bytes = npmPackFixture({
+        "package/package.json": JSON.stringify({
+          name: "@scope/demo",
+          version: "1.2.3",
+        }),
+        "package/openclaw.plugin.json": JSON.stringify({ id: "demo.plugin" }),
+      });
+      const identity = artifactIdentity(bytes);
+      await mkdir(join(workdir, "downloads"), { recursive: true });
+      httpMocks.apiRequest
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+            runtimeId: "demo.plugin",
+            channel: "community",
+            isOfficial: false,
+            summary: null,
+            latestVersion: "1.2.3",
+            createdAt: 1,
+            updatedAt: 2,
+            tags: { latest: "1.2.3" },
+          },
+          owner: null,
+        })
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+          },
+          version: "1.2.3",
+          artifact: {
+            kind: "npm-pack",
+            sha256: identity.sha256,
+            size: bytes.byteLength,
+            format: "tgz",
+            npmIntegrity: identity.npmIntegrity,
+            npmShasum: identity.npmShasum,
+            npmTarballName: "demo-1.2.3.tgz",
+            downloadUrl: "https://clawhub.ai/api/npm/@scope/demo/-/demo-1.2.3.tgz",
+            tarballUrl: "https://clawhub.ai/api/npm/@scope/demo/-/demo-1.2.3.tgz",
+            legacyDownloadUrl:
+              "https://clawhub.ai/api/v1/packages/@scope/demo/download?version=1.2.3",
+          },
+        });
+      httpMocks.fetchBinary.mockResolvedValue(bytes);
+
+      await cmdDownloadPackage(makeOpts(workdir), "@scope/demo", {
+        tag: "latest",
+        output: "downloads",
+      });
+
+      expect(httpMocks.apiRequest.mock.calls[1]?.[1]).toMatchObject({
+        method: "GET",
+        path: "/api/v1/packages/%40scope%2Fdemo/versions/1.2.3/artifact",
+      });
+      expect(httpMocks.fetchBinary).toHaveBeenCalledWith("https://clawhub.ai", {
+        url: "https://clawhub.ai/api/npm/@scope/demo/-/demo-1.2.3.tgz",
+        token: undefined,
+      });
+      expect(await readFile(join(workdir, "downloads", "demo-1.2.3.tgz"))).toEqual(
+        Buffer.from(bytes),
+      );
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining("Downloaded @scope/demo@1.2.3"));
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("downloads legacy ZIP artifacts without enforcing stale stored release digests", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const bytes = new TextEncoder().encode("rebuilt legacy zip");
+      await mkdir(join(workdir, "downloads"), { recursive: true });
+      httpMocks.apiRequest
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+            runtimeId: "demo.plugin",
+            channel: "community",
+            isOfficial: false,
+            summary: null,
+            latestVersion: "1.2.3",
+            createdAt: 1,
+            updatedAt: 2,
+            tags: { latest: "1.2.3" },
+          },
+          owner: null,
+        })
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+          },
+          version: "1.2.3",
+          artifact: {
+            kind: "legacy-zip",
+            sha256: "0".repeat(64),
+            format: "zip",
+            downloadUrl: "https://clawhub.ai/api/v1/packages/@scope/demo/download?version=1.2.3",
+            legacyDownloadUrl:
+              "https://clawhub.ai/api/v1/packages/@scope/demo/download?version=1.2.3",
+          },
+        });
+      httpMocks.fetchBinary.mockResolvedValue(bytes);
+
+      await cmdDownloadPackage(makeOpts(workdir), "@scope/demo", {
+        tag: "latest",
+        output: "downloads",
+      });
+
+      expect(await readFile(join(workdir, "downloads", "scope-demo-1.2.3.zip"))).toEqual(
+        Buffer.from(bytes),
+      );
+      expect(uiMocks.spinner.fail).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies a local ClawPack against resolved artifact metadata", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const bytes = npmPackFixture({
+        "package/package.json": JSON.stringify({
+          name: "@scope/demo",
+          version: "1.2.3",
+        }),
+        "package/openclaw.plugin.json": JSON.stringify({ id: "demo.plugin" }),
+      });
+      const identity = artifactIdentity(bytes);
+      await writeFile(join(workdir, "demo-1.2.3.tgz"), bytes);
+      httpMocks.apiRequest
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+            runtimeId: "demo.plugin",
+            channel: "community",
+            isOfficial: false,
+            summary: null,
+            latestVersion: "1.2.3",
+            createdAt: 1,
+            updatedAt: 2,
+            tags: { latest: "1.2.3" },
+          },
+          owner: null,
+        })
+        .mockResolvedValueOnce({
+          package: {
+            name: "@scope/demo",
+            displayName: "Demo",
+            family: "code-plugin",
+          },
+          version: "1.2.3",
+          artifact: {
+            kind: "npm-pack",
+            sha256: identity.sha256,
+            format: "tgz",
+            npmIntegrity: identity.npmIntegrity,
+            npmShasum: identity.npmShasum,
+            npmTarballName: "demo-1.2.3.tgz",
+            downloadUrl: "https://clawhub.ai/api/npm/@scope/demo/-/demo-1.2.3.tgz",
+          },
+        });
+
+      await cmdVerifyPackage(makeOpts(workdir), "demo-1.2.3.tgz", {
+        packageName: "@scope/demo",
+        tag: "latest",
+      });
+
+      expect(mockLog).toHaveBeenCalledWith("OK. Artifact verification passed.");
+      expect(uiMocks.spinner.fail).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails package artifact verification on digest mismatch", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const bytes = npmPackFixture({
+        "package/package.json": JSON.stringify({
+          name: "@scope/demo",
+          version: "1.2.3",
+        }),
+      });
+      await writeFile(join(workdir, "demo-1.2.3.tgz"), bytes);
+
+      await expect(
+        cmdVerifyPackage(makeOpts(workdir), "demo-1.2.3.tgz", {
+          sha256: "bad",
+        }),
+      ).rejects.toThrow("SHA-256 mismatch");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("sets package release moderation state", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      packageId: "pkg_1",
+      releaseId: "rel_1",
+      state: "quarantined",
+      scanStatus: "malicious",
+    });
+
+    await cmdModeratePackageRelease(makeOpts(), "@scope/demo", {
+      version: "1.2.3",
+      state: "quarantined",
+      reason: "suspicious native payload",
+    });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/packages/%40scope%2Fdemo/versions/1.2.3/moderation",
+        token: "tkn",
+        body: {
+          state: "quarantined",
+          reason: "suspicious native payload",
+        },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith(
+      "OK. @scope/demo@1.2.3 moderation state set to quarantined.",
+    );
+  });
+
+  it("reports packages for moderator review", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      reported: true,
+      alreadyReported: false,
+      packageId: "pkg_1",
+      releaseId: "rel_1",
+      reportCount: 1,
+    });
+
+    await cmdReportPackage(makeOpts(), "@scope/demo", {
+      version: "1.2.3",
+      reason: "suspicious native payload",
+    });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/packages/%40scope%2Fdemo/report",
+        token: "tkn",
+        body: {
+          reason: "suspicious native payload",
+          version: "1.2.3",
+        },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("OK. Reported @scope/demo@1.2.3 for moderator review.");
+  });
+
+  it("lists package reports", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      items: [
+        {
+          reportId: "packageReports:1",
+          packageId: "pkg_1",
+          releaseId: "rel_1",
+          name: "@scope/demo",
+          displayName: "Demo",
+          family: "code-plugin",
+          version: "1.2.3",
+          reason: "suspicious",
+          status: "open",
+          createdAt: 1,
+          reporter: { userId: "users:reporter", handle: "reporter", displayName: "Reporter" },
+          triagedAt: null,
+          triagedBy: null,
+          triageNote: null,
+        },
+      ],
+      nextCursor: null,
+      done: true,
+    });
+
+    await cmdListPackageReports(makeOpts(), { status: "open", limit: 10 });
+
+    const request = httpMocks.apiRequest.mock.calls[0]?.[1] as { url?: string } | undefined;
+    const url = new URL(String(request?.url));
+    expect(url.pathname).toBe("/api/v1/packages/reports");
+    expect(url.searchParams.get("status")).toBe("open");
+    expect(url.searchParams.get("limit")).toBe("10");
+    expect(mockLog).toHaveBeenCalledWith("packageReports:1 open @scope/demo@1.2.3");
+  });
+
+  it("triages package reports", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      reportId: "packageReports:1",
+      packageId: "pkg_1",
+      status: "confirmed",
+      reportCount: 0,
+      actionTaken: "quarantine",
+    });
+
+    await cmdTriagePackageReport(makeOpts(), "packageReports:1", {
+      status: "confirmed",
+      note: "handled",
+      action: "quarantine",
+      yes: true,
+    });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/packages/reports/packageReports%3A1/triage",
+        token: "tkn",
+        body: {
+          status: "confirmed",
+          note: "handled",
+          finalAction: "quarantine",
+        },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith(
+      "OK. Report packageReports:1 set to confirmed; action quarantine.",
+    );
+    expect(mockLog).toHaveBeenCalledWith("  - Quarantine the package release.");
+  });
+
+  it("shows package moderation status", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      package: {
+        packageId: "pkg_1",
+        name: "@scope/demo",
+        displayName: "Demo",
+        family: "code-plugin",
+        channel: "community",
+        isOfficial: false,
+        reportCount: 2,
+        lastReportedAt: 456,
+        scanStatus: "malicious",
+      },
+      latestRelease: {
+        releaseId: "rel_1",
+        version: "1.2.3",
+        artifactKind: "npm-pack",
+        scanStatus: "malicious",
+        moderationState: "quarantined",
+        moderationReason: "manual review",
+        blockedFromDownload: true,
+        reasons: ["manual:quarantined", "scan:malicious", "reports:2"],
+        createdAt: 123,
+      },
+    });
+
+    await cmdPackageModerationStatus(makeOpts(), "@scope/demo");
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "GET",
+        path: "/api/v1/packages/%40scope%2Fdemo/moderation",
+        token: "tkn",
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("@scope/demo moderation");
+    expect(mockLog).toHaveBeenCalledWith("  blocked: yes");
+  });
+
+  it("lists the package moderation queue", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      items: [
+        {
+          packageId: "pkg_1",
+          releaseId: "rel_1",
+          name: "@scope/demo",
+          displayName: "Demo",
+          family: "code-plugin",
+          channel: "community",
+          isOfficial: false,
+          version: "1.2.3",
+          createdAt: 1,
+          artifactKind: "npm-pack",
+          scanStatus: "malicious",
+          moderationState: "quarantined",
+          moderationReason: "manual review",
+          sourceRepo: "openclaw/demo",
+          sourceCommit: "abc123",
+          reportCount: 0,
+          lastReportedAt: null,
+          reasons: ["manual:quarantined", "scan:malicious"],
+        },
+      ],
+      nextCursor: "cursor-1",
+      done: false,
+    });
+
+    await cmdPackageModerationQueue(makeOpts(), { status: "blocked", limit: 10 });
+
+    const request = httpMocks.apiRequest.mock.calls[0]?.[1] as { url?: string } | undefined;
+    const url = new URL(String(request?.url));
+    expect(url.pathname).toBe("/api/v1/packages/moderation/queue");
+    expect(url.searchParams.get("status")).toBe("blocked");
+    expect(url.searchParams.get("limit")).toBe("10");
+    expect(httpMocks.apiRequest.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      token: "tkn",
+    });
+    expect(mockLog).toHaveBeenCalledWith(
+      "@scope/demo@1.2.3 malicious quarantined [manual:quarantined, scan:malicious]",
+    );
+    expect(mockLog).toHaveBeenCalledWith("Next cursor: cursor-1");
+  });
+
+  it("dry-runs package artifact metadata backfill by default", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      scanned: 20,
+      updated: 3,
+      nextCursor: "cursor-1",
+      done: false,
+      dryRun: true,
+    });
+
+    await cmdBackfillPackageArtifacts(makeOpts(), { batchSize: 20 });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/packages/backfill/artifacts",
+        token: "tkn",
+        body: {
+          cursor: null,
+          batchSize: 20,
+          dryRun: true,
+        },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith(
+      "Dry run package artifact backfill: scanned 20, would update 3.",
+    );
+    expect(mockLog).toHaveBeenCalledWith("Next cursor: cursor-1");
+  });
+
+  it("can apply package artifact backfill across all pages", async () => {
+    httpMocks.apiRequest
+      .mockResolvedValueOnce({
+        ok: true,
+        scanned: 100,
+        updated: 8,
+        nextCursor: "cursor-2",
+        done: false,
+        dryRun: false,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        scanned: 5,
+        updated: 1,
+        nextCursor: null,
+        done: true,
+        dryRun: false,
+      });
+
+    await cmdBackfillPackageArtifacts(makeOpts(), { apply: true, all: true, batchSize: 100 });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledTimes(2);
+    expect(httpMocks.apiRequest.mock.calls[0]?.[1]).toMatchObject({
+      body: { cursor: null, batchSize: 100, dryRun: false },
+    });
+    expect(httpMocks.apiRequest.mock.calls[1]?.[1]).toMatchObject({
+      body: { cursor: "cursor-2", batchSize: 100, dryRun: false },
+    });
+    expect(mockLog).toHaveBeenCalledWith(
+      "Applied package artifact backfill: scanned 105, updated 9.",
+    );
+  });
+
+  it("prints package readiness checks", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      package: {
+        name: "@scope/demo",
+        displayName: "Demo",
+        family: "code-plugin",
+        isOfficial: true,
+        latestVersion: "1.2.3",
+      },
+      ready: false,
+      checks: [
+        {
+          id: "clawpack",
+          label: "ClawPack artifact",
+          status: "fail",
+          message: "Latest version is legacy ZIP-only.",
+        },
+      ],
+      blockers: ["clawpack"],
+    });
+
+    await cmdPackageReadiness(makeOpts(), "@scope/demo");
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "GET",
+        path: "/api/v1/packages/%40scope%2Fdemo/readiness",
+        token: undefined,
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("@scope/demo readiness: blocked");
+    expect(mockLog).toHaveBeenCalledWith("FAIL clawpack: Latest version is legacy ZIP-only.");
+    expect(mockLog).toHaveBeenCalledWith("Blockers: clawpack");
+  });
+
+  it("prints package migration status checks", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      package: {
+        name: "@scope/demo",
+        displayName: "Demo",
+        family: "code-plugin",
+        isOfficial: true,
+        latestVersion: "1.2.3",
+      },
+      ready: true,
+      checks: [
+        {
+          id: "clawpack",
+          label: "ClawPack artifact",
+          status: "pass",
+          message: "Latest version has a ClawPack artifact.",
+        },
+      ],
+      blockers: [],
+    });
+
+    await cmdPackageMigrationStatus(makeOpts(), "@scope/demo");
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "GET",
+        path: "/api/v1/packages/%40scope%2Fdemo/readiness",
+        token: undefined,
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("@scope/demo migration: ready");
+    expect(mockLog).toHaveBeenCalledWith("Version: 1.2.3");
+    expect(mockLog).toHaveBeenCalledWith("Official: yes");
+    expect(mockLog).toHaveBeenCalledWith("PASS clawpack: Latest version has a ClawPack artifact.");
+  });
+
+  it("lists package migration rows", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      items: [
+        {
+          migrationId: "officialPluginMigrations:1",
+          bundledPluginId: "core.search",
+          packageName: "@scope/demo",
+          packageId: "pkg_1",
+          owner: "platform",
+          sourceRepo: "openclaw/openclaw",
+          sourcePath: "plugins/search",
+          sourceCommit: "abc123",
+          phase: "blocked",
+          blockers: ["missing ClawPack"],
+          hostTargetsComplete: true,
+          scanClean: false,
+          moderationApproved: false,
+          runtimeBundlesReady: false,
+          notes: "needs publisher upload",
+          createdAt: 100,
+          updatedAt: 200,
+        },
+      ],
+      nextCursor: null,
+      done: true,
+    });
+
+    await cmdListPackageMigrations(makeOpts(), { phase: "blocked", limit: 10 });
+
+    const url = new URL(httpMocks.apiRequest.mock.calls[0]?.[1].url as string);
+    expect(url.pathname).toBe("/api/v1/packages/migrations");
+    expect(url.searchParams.get("phase")).toBe("blocked");
+    expect(url.searchParams.get("limit")).toBe("10");
+    expect(mockLog).toHaveBeenCalledWith("core.search blocked @scope/demo blockers:1");
+    expect(mockLog).toHaveBeenCalledWith("  source: openclaw/openclaw plugins/search abc123");
+    expect(mockLog).toHaveBeenCalledWith("  notes: needs publisher upload");
+  });
+
+  it("upserts package migration rows", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      migration: {
+        migrationId: "officialPluginMigrations:1",
+        bundledPluginId: "core.search",
+        packageName: "@scope/demo",
+        packageId: "pkg_1",
+        owner: "platform",
+        sourceRepo: "openclaw/openclaw",
+        sourcePath: "plugins/search",
+        sourceCommit: null,
+        phase: "blocked",
+        blockers: ["missing ClawPack"],
+        hostTargetsComplete: true,
+        scanClean: false,
+        moderationApproved: false,
+        runtimeBundlesReady: false,
+        notes: null,
+        createdAt: 100,
+        updatedAt: 200,
+      },
+    });
+
+    await cmdUpsertPackageMigration(makeOpts(), "core.search", {
+      package: "@scope/demo",
+      owner: "platform",
+      sourceRepo: "openclaw/openclaw",
+      sourcePath: "plugins/search",
+      phase: "blocked",
+      blockers: "missing ClawPack",
+      hostTargetsComplete: true,
+    });
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      {
+        method: "POST",
+        path: "/api/v1/packages/migrations",
+        token: "tkn",
+        body: {
+          bundledPluginId: "core.search",
+          packageName: "@scope/demo",
+          owner: "platform",
+          sourceRepo: "openclaw/openclaw",
+          sourcePath: "plugins/search",
+          phase: "blocked",
+          blockers: ["missing ClawPack"],
+          hostTargetsComplete: true,
+        },
+      },
+      expect.anything(),
+    );
+    expect(mockLog).toHaveBeenCalledWith("OK. Migration core.search is blocked for @scope/demo.");
+  });
+
   it("publishes a code plugin package with an exact explicit payload", async () => {
     const workdir = await makeTmpWorkdir();
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(123_456_789);
@@ -218,6 +988,7 @@ describe("package commands", () => {
           name: "@scope/demo-plugin",
           displayName: "Demo Plugin",
           version: "1.0.0",
+          files: ["dist", "openclaw.plugin.json"],
         }),
         "utf8",
       );
@@ -240,6 +1011,7 @@ describe("package commands", () => {
         sourceRepo: "openclaw/demo-plugin",
         sourceCommit: "abc123",
         sourceRef: "refs/tags/v1.0.0",
+        clawscanNote: "This plugin shells out only to the bundled helper binary.",
       });
 
       expect(getPublishPayload()).toEqual({
@@ -249,6 +1021,7 @@ describe("package commands", () => {
         family: "code-plugin",
         version: "1.0.0",
         changelog: "",
+        clawScanNote: "This plugin shells out only to the bundled helper binary.",
         tags: ["latest"],
         source: {
           kind: "github",
@@ -260,8 +1033,15 @@ describe("package commands", () => {
           importedAt: 123_456_789,
         },
       });
-      expect(getUploadedFileNames()).toEqual([
-        ".gitignore",
+      expect(getUploadedFileNames()).toEqual([]);
+      expect(getUploadedClawPackNames()).toEqual(["scope-demo-plugin-1.0.0.tgz"]);
+      expect(httpMocks.apiRequestForm.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ retryCount: 5 }),
+      );
+      const uploadedPack = getUploadedClawPacks()[0];
+      if (!uploadedPack) throw new Error("Missing uploaded ClawPack");
+      const parsed = parseClawPack(new Uint8Array(await uploadedPack.arrayBuffer()));
+      expect(parsed.entries.map((entry) => entry.path).sort()).toEqual([
         "dist/index.js",
         "openclaw.plugin.json",
         "package.json",
@@ -273,6 +1053,199 @@ describe("package commands", () => {
       expect(mockLog).not.toHaveBeenCalled();
       expect(mockWrite).not.toHaveBeenCalled();
       dateSpy.mockRestore();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects oversized clawscan notes before uploading package files", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "demo-plugin");
+      await mkdir(join(folder, "dist"), { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        makeCodePluginPackageJson({ name: "demo-plugin", version: "1.0.0" }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "demo.plugin" }),
+        "utf8",
+      );
+
+      await expect(
+        cmdPublishPackage(makeOpts(workdir), "demo-plugin", {
+          clawscanNote: "x".repeat(MAX_CLAWSCAN_NOTE_CHARS + 1),
+        }),
+      ).rejects.toThrow(`ClawScan note must be at most ${MAX_CLAWSCAN_NOTE_CHARS} characters.`);
+      expect(httpMocks.apiRequestForm).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes a ClawPack tarball without uploading extracted files", async () => {
+    const workdir = await makeTmpWorkdir();
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(123_456_789);
+    try {
+      const packName = "demo-plugin-1.0.0.tgz";
+      await writeFile(
+        join(workdir, packName),
+        npmPackFixture({
+          "package/package.json": makeCodePluginPackageJson({
+            name: "@scope/demo-plugin",
+            displayName: "Demo Plugin",
+            version: "1.0.0",
+          }),
+          "package/openclaw.plugin.json": JSON.stringify({ id: "demo.plugin" }),
+          "package/dist/index.js": "export const demo = true;\n",
+        }),
+      );
+
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        packageId: "pkg_1",
+        releaseId: "rel_1",
+      });
+
+      await cmdPublishPackage(makeOpts(workdir), packName, {
+        sourceRepo: "openclaw/demo-plugin",
+        sourceCommit: "abc123",
+      });
+
+      expect(getPublishPayload()).toEqual({
+        name: "@scope/demo-plugin",
+        displayName: "Demo Plugin",
+        family: "code-plugin",
+        version: "1.0.0",
+        changelog: "",
+        tags: ["latest"],
+        source: {
+          kind: "github",
+          url: "https://github.com/openclaw/demo-plugin",
+          repo: "openclaw/demo-plugin",
+          ref: "abc123",
+          commit: "abc123",
+          path: ".",
+          importedAt: 123_456_789,
+        },
+      });
+      expect(getUploadedClawPackNames()).toEqual([packName]);
+      expect(getUploadedFileNames()).toEqual([]);
+      expect(uiMocks.spinner.succeed).toHaveBeenCalledWith(
+        "OK. Published @scope/demo-plugin@1.0.0 (rel_1)",
+      );
+      dateSpy.mockRestore();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("packs a plugin folder through npm pack and validates the ClawPack", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "demo-plugin");
+      await mkdir(join(folder, "dist"), { recursive: true });
+      await mkdir(join(workdir, "packs"), { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        makeCodePluginPackageJson({
+          name: "@scope/demo-plugin",
+          displayName: "Demo Plugin",
+          version: "1.0.0",
+          description: "Demo plugin",
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "demo.plugin" }),
+        "utf8",
+      );
+      await writeFile(join(folder, "dist", "index.js"), "export const demo = true;\n", "utf8");
+
+      await cmdPackPackage(makeOpts(workdir), "demo-plugin", {
+        packDestination: "packs",
+      });
+
+      const packPath = join(workdir, "packs", "scope-demo-plugin-1.0.0.tgz");
+      const parsed = parseClawPack(new Uint8Array(await readFile(packPath)));
+      expect(parsed.packageName).toBe("@scope/demo-plugin");
+      expect(parsed.packageVersion).toBe("1.0.0");
+      expect(parsed.entries.map((entry) => entry.path)).toContain("openclaw.plugin.json");
+      expect(mockLog).toHaveBeenCalledWith(`Path: ${packPath}`);
+      expect(uiMocks.spinner.succeed).toHaveBeenCalledWith(
+        `Packed @scope/demo-plugin@1.0.0 -> ${packPath}`,
+      );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a code plugin ClawPack with TypeScript entries and no compiled runtime", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const packName = "demo-plugin-1.0.0.tgz";
+      await writeFile(
+        join(workdir, packName),
+        npmPackFixture({
+          "package/package.json": makeCodePluginPackageJson({
+            name: "@scope/demo-plugin",
+            displayName: "Demo Plugin",
+            version: "1.0.0",
+            openclaw: {
+              extensions: ["./index.ts"],
+              compat: {
+                pluginApi: ">=2026.3.24-beta.2",
+              },
+              build: {
+                openclawVersion: "2026.3.24-beta.2",
+              },
+            },
+          }),
+          "package/openclaw.plugin.json": JSON.stringify({ id: "demo.plugin" }),
+          "package/index.ts": "export const demo = true;\n",
+        }),
+      );
+
+      await expect(
+        cmdPublishPackage(makeOpts(workdir), packName, {
+          sourceRepo: "openclaw/demo-plugin",
+          sourceCommit: "abc123",
+        }),
+      ).rejects.toThrow(
+        "@scope/demo-plugin requires compiled runtime output for TypeScript entry ./index.ts",
+      );
+      expect(httpMocks.apiRequestForm).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a ClawPack tarball without openclaw.plugin.json", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const packName = "demo-plugin-1.0.0.tgz";
+      await writeFile(
+        join(workdir, packName),
+        npmPackFixture({
+          "package/package.json": makeCodePluginPackageJson({
+            name: "demo-plugin",
+            displayName: "Demo Plugin",
+            version: "1.0.0",
+          }),
+          "package/dist/index.js": "export const demo = true;\n",
+        }),
+      );
+
+      await expect(
+        cmdPublishPackage(makeOpts(workdir), packName, {
+          sourceRepo: "openclaw/demo-plugin",
+          sourceCommit: "abc123",
+        }),
+      ).rejects.toThrow("ClawPack must contain package/openclaw.plugin.json");
+      expect(httpMocks.apiRequestForm).not.toHaveBeenCalled();
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }
@@ -570,11 +1543,12 @@ describe("package commands", () => {
     }
   });
 
-  it("publishes a bundle plugin package with manifest-driven family detection", async () => {
+  it("publishes a bundle plugin package with real bundle marker detection", async () => {
     const workdir = await makeTmpWorkdir();
     try {
       const folder = join(workdir, "demo-bundle");
       await mkdir(join(folder, "dist"), { recursive: true });
+      await mkdir(join(folder, ".codex-plugin"), { recursive: true });
       await writeFile(
         join(folder, "package.json"),
         JSON.stringify({
@@ -585,8 +1559,13 @@ describe("package commands", () => {
         "utf8",
       );
       await writeFile(
-        join(folder, "openclaw.bundle.json"),
-        JSON.stringify({ id: "demo.bundle", hostTargets: ["desktop", "mobile"] }),
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "demo.bundle" }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, ".codex-plugin", "plugin.json"),
+        JSON.stringify({ name: "Demo Bundle", skills: ["skills"] }),
         "utf8",
       );
       await writeFile(join(folder, "dist", "plugin.wasm"), "binary", "utf8");
@@ -615,8 +1594,9 @@ describe("package commands", () => {
         },
       });
       expect(getUploadedFileNames()).toEqual([
+        ".codex-plugin/plugin.json",
         "dist/plugin.wasm",
-        "openclaw.bundle.json",
+        "openclaw.plugin.json",
         "package.json",
       ]);
     } finally {
@@ -628,7 +1608,7 @@ describe("package commands", () => {
     const workdir = await makeTmpWorkdir();
     try {
       const folder = join(workdir, "demo-plugin");
-      await mkdir(folder, { recursive: true });
+      await mkdir(join(folder, "dist"), { recursive: true });
       await writeFile(
         join(folder, "package.json"),
         makeCodePluginPackageJson({ name: "demo-plugin", version: "1.0.0" }),
@@ -710,7 +1690,55 @@ describe("package commands", () => {
     }
   });
 
-  it("rejects bundle-plugin publish when host targets cannot be resolved", async () => {
+  it("publishes code plugins when host targets are missing", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "demo-plugin");
+      await mkdir(join(folder, "dist"), { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        JSON.stringify({
+          name: "demo-plugin",
+          displayName: "Demo Plugin",
+          version: "1.0.0",
+          openclaw: {
+            extensions: ["./index.ts"],
+            compat: { pluginApi: ">=2026.3.24-beta.2" },
+            build: { openclawVersion: "2026.3.24-beta.2" },
+            environment: {},
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "demo.plugin", configSchema: { type: "object" } }),
+        "utf8",
+      );
+      await writeFile(join(folder, "dist", "index.js"), "export const demo = true;\n", "utf8");
+
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        packageId: "pkg_1",
+        releaseId: "rel_1",
+      });
+
+      await cmdPublishPackage(makeOpts(workdir), "demo-plugin", {
+        sourceRepo: "openclaw/demo-plugin",
+        sourceCommit: "abc123",
+      });
+
+      expect(getPublishPayload()).toMatchObject({
+        name: "demo-plugin",
+        family: "code-plugin",
+        version: "1.0.0",
+      });
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects bundle-plugin publish when openclaw.plugin.json is missing", async () => {
     const workdir = await makeTmpWorkdir();
     try {
       const folder = join(workdir, "demo-bundle");
@@ -723,7 +1751,7 @@ describe("package commands", () => {
 
       await expect(
         cmdPublishPackage(makeOpts(workdir), "demo-bundle", { family: "bundle-plugin" }),
-      ).rejects.toThrow("Bundle plugins need openclaw.bundle.json or --host-targets");
+      ).rejects.toThrow("openclaw.plugin.json required");
       expect(httpMocks.apiRequestForm).not.toHaveBeenCalled();
     } finally {
       await rm(workdir, { recursive: true, force: true });
@@ -737,9 +1765,10 @@ describe("package commands", () => {
       await mkdir(join(folder, "dist"), { recursive: true });
       await mkdir(join(folder, "node_modules", "pkg"), { recursive: true });
       await mkdir(join(folder, ".git"), { recursive: true });
+      await mkdir(join(folder, ".codex-plugin"), { recursive: true });
       await writeFile(
         join(folder, "package.json"),
-        makeCodePluginPackageJson({
+        JSON.stringify({
           name: "ignored-plugin",
           displayName: "Ignored Plugin",
           version: "1.0.0",
@@ -749,6 +1778,11 @@ describe("package commands", () => {
       await writeFile(
         join(folder, "openclaw.plugin.json"),
         JSON.stringify({ id: "ignored.plugin" }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, ".codex-plugin", "plugin.json"),
+        JSON.stringify({ name: "Ignored Plugin", skills: ["skills"] }),
         "utf8",
       );
       await writeFile(join(folder, ".clawhubignore"), "ignored.txt\n", "utf8");
@@ -774,6 +1808,7 @@ describe("package commands", () => {
 
       expect(getUploadedFileNames()).toEqual([
         ".clawhubignore",
+        ".codex-plugin/plugin.json",
         "dist/index.js",
         "openclaw.plugin.json",
         "package.json",
@@ -1016,6 +2051,93 @@ describe("package commands", () => {
       });
       dateSpy.mockRestore();
     } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses --source-path as the package folder for GitHub shorthand sources", async () => {
+    const workdir = await makeTmpWorkdir();
+    const originalFetch = globalThis.fetch;
+    const commit = "0123456789abcdef0123456789abcdef01234567";
+    const archiveBytes = zipSync({
+      "repo-root/plugins/demo/package.json": new TextEncoder().encode(
+        makeCodePluginPackageJson({
+          name: "@scope/demo-plugin",
+          displayName: "Demo Plugin",
+          version: "1.0.0",
+        }),
+      ),
+      "repo-root/plugins/demo/openclaw.plugin.json": new TextEncoder().encode(
+        JSON.stringify({ id: "demo.plugin" }),
+      ),
+      "repo-root/plugins/demo/dist/index.js": new TextEncoder().encode("export {};\n"),
+      "repo-root/other/package.json": new TextEncoder().encode('{"name":"wrong"}\n'),
+    });
+    const archiveBody = archiveBytes.buffer.slice(
+      archiveBytes.byteOffset,
+      archiveBytes.byteOffset + archiveBytes.byteLength,
+    ) as ArrayBuffer;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.endsWith("/repos/owner/repo/commits/main")) {
+        return new Response(JSON.stringify({ sha: commit }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith(`/repos/owner/repo/zipball/${commit}`)) {
+        return new Response(archiveBody, {
+          status: 200,
+          headers: { "content-type": "application/zip" },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchMock,
+      configurable: true,
+      writable: true,
+    });
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(555_555_555);
+
+    try {
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        packageId: "pkg_1",
+        releaseId: "rel_1",
+      });
+
+      await cmdPublishPackage(makeOpts(workdir), "owner/repo@main", {
+        sourcePath: "plugins/demo",
+      });
+
+      expect(getUploadedFileNames()).toEqual([]);
+      expect(getUploadedClawPackNames()).toEqual(["scope-demo-plugin-1.0.0.tgz"]);
+      expect(getPublishPayload()).toEqual({
+        name: "@scope/demo-plugin",
+        displayName: "Demo Plugin",
+        family: "code-plugin",
+        version: "1.0.0",
+        changelog: "",
+        tags: ["latest"],
+        source: {
+          kind: "github",
+          url: "https://github.com/owner/repo",
+          repo: "owner/repo",
+          ref: "main",
+          commit,
+          path: "plugins/demo",
+          importedAt: 555_555_555,
+        },
+      });
+    } finally {
+      Object.defineProperty(globalThis, "fetch", {
+        value: originalFetch,
+        configurable: true,
+        writable: true,
+      });
+      dateSpy.mockRestore();
       await rm(workdir, { recursive: true, force: true });
     }
   });
@@ -1263,6 +2385,72 @@ describe("package commands", () => {
         token: "tkn",
       }),
       undefined,
+    );
+  });
+
+  it("soft-deletes a package with confirmation bypass", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({ ok: true });
+
+    await cmdDeletePackage(makeOpts(), "@openclaw/zalo", { yes: true }, false);
+
+    expect(authTokenMocks.requireAuthToken).toHaveBeenCalled();
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      expect.objectContaining({
+        method: "DELETE",
+        path: "/api/v1/packages/%40openclaw%2Fzalo",
+        token: "tkn",
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("transfers a package to another publisher", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({
+      ok: true,
+      packageId: "packages:opik",
+      name: "@opik/opik-openclaw",
+      ownerUserId: "users:vincent",
+      ownerPublisherId: "publishers:opik",
+      channel: "community",
+      isOfficial: false,
+    });
+
+    await cmdTransferPackage(makeOpts(), "@opik/opik-openclaw", { to: "opik" });
+
+    expect(authTokenMocks.requireAuthToken).toHaveBeenCalled();
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      expect.objectContaining({
+        method: "POST",
+        path: "/api/v1/packages/%40opik%2Fopik-openclaw/transfer",
+        token: "tkn",
+        body: { toOwner: "opik" },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("requires --yes for non-interactive package deletes", async () => {
+    await expect(cmdDeletePackage(makeOpts(), "@openclaw/zalo", {}, false)).rejects.toThrow(
+      /--yes/i,
+    );
+    expect(httpMocks.apiRequest).not.toHaveBeenCalled();
+  });
+
+  it("restores package deletes through the undelete endpoint", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({ ok: true });
+
+    await cmdUndeletePackage(makeOpts(), "@openclaw/zalo", { yes: true }, false);
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      expect.objectContaining({
+        method: "POST",
+        path: "/api/v1/packages/%40openclaw%2Fzalo/undelete",
+        token: "tkn",
+      }),
+      expect.anything(),
     );
   });
 });

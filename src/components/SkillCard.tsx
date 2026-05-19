@@ -1,8 +1,9 @@
 import { Link } from "@tanstack/react-router";
-import { ShieldCheck } from "lucide-react";
 import type { ReactNode } from "react";
 import type { PublicSkill } from "../lib/publicUser";
+import { MarketplaceIcon } from "./MarketplaceIcon";
 import { Badge } from "./ui/badge";
+import { VerifiedBadge } from "./VerifiedBadge";
 
 type SkillCardProps = {
   skill: PublicSkill;
@@ -12,7 +13,7 @@ type SkillCardProps = {
   summaryFallback: string;
   meta: ReactNode;
   href?: string;
-  verified?: boolean;
+  className?: string;
 };
 
 export function SkillCard({
@@ -23,7 +24,7 @@ export function SkillCard({
   summaryFallback,
   meta,
   href,
-  verified,
+  className,
 }: SkillCardProps) {
   const owner = encodeURIComponent(String(skill.ownerUserId));
   const link = href ?? `/${owner}/${skill.slug}`;
@@ -31,43 +32,30 @@ export function SkillCard({
   const hasTags = badges.length || chip || platformLabels?.length;
 
   return (
-    <Link
-      to={link}
-      className="group flex w-full flex-col gap-3 rounded-[var(--radius-md)] border border-[color:var(--line)] bg-[color:var(--surface)] p-[22px] no-underline transition-all duration-200 ease-out hover:-translate-y-0.5 hover:shadow-[0_12px_28px_rgba(29,26,23,0.12)] hover:border-[color:var(--border-ui-hover)]"
-    >
+    <Link to={link} className={["card skill-card", className].filter(Boolean).join(" ")}>
       {hasTags ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {badges.map((label) => (
-            <Badge key={label} variant="default">
-              {label}
-            </Badge>
-          ))}
-          {chip ? (
-            <Badge variant="accent" className="text-[0.72rem] px-2.5 py-0.5">
-              {chip}
-            </Badge>
-          ) : null}
+        <div className="skill-card-tags">
+          {badges.map((label) =>
+            label === "Verified" ? (
+              <VerifiedBadge key={label} />
+            ) : (
+              <Badge key={label}>{label}</Badge>
+            ),
+          )}
+          {chip ? <Badge variant="accent">{chip}</Badge> : null}
           {platformLabels?.map((label) => (
             <Badge key={label} variant="compact">
               {label}
             </Badge>
           ))}
-          {verified && (
-            <span className="inline-flex items-center gap-1 text-[0.72rem] font-semibold text-emerald-600 dark:text-emerald-400">
-              <ShieldCheck className="h-3.5 w-3.5" />
-            </span>
-          )}
         </div>
       ) : null}
-      <h3 className="font-display text-base font-bold leading-tight text-[color:var(--ink)] group-hover:text-[color:var(--accent)]">
-        {skill.displayName}
-      </h3>
-      <p className="line-clamp-2 text-sm leading-relaxed text-[color:var(--ink-soft)]">
-        {skill.summary ?? summaryFallback}
-      </p>
-      <div className="mt-auto flex flex-col gap-2 pt-1 text-[0.82rem] text-[color:var(--ink-soft)]">
-        {meta}
+      <div className="skill-card-header">
+        <MarketplaceIcon kind="skill" label={skill.displayName} icon={skill.icon} size="md" />
+        <h3 className="skill-card-title">{skill.displayName}</h3>
       </div>
+      <p className="skill-card-summary">{skill.summary ?? summaryFallback}</p>
+      <div className="skill-card-footer">{meta}</div>
     </Link>
   );
 }

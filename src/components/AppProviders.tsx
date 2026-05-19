@@ -1,8 +1,15 @@
 import { ConvexAuthProvider, useAuthActions } from "@convex-dev/auth/react";
 import { useEffect, useRef } from "react";
 import { convex } from "../convex/client";
-import { getUserFacingAuthError, normalizeAuthErrorMessage } from "../lib/authErrorMessage";
+import {
+  AUTH_CODE_NO_SESSION_MESSAGE,
+  getUserFacingAuthError,
+  normalizeAuthErrorMessage,
+} from "../lib/authErrorMessage";
 import { clearAuthError, setAuthError } from "../lib/useAuthError";
+import { ClientOnly } from "./ClientOnly";
+import { DevPersonaFab } from "./DevPersonaFab";
+import { TooltipProvider } from "./ui/tooltip";
 import { UserBootstrap } from "./UserBootstrap";
 
 function getPendingAuthCode() {
@@ -37,7 +44,7 @@ export function AuthCodeHandler() {
     void signInWithCode(undefined, { code: pending.code })
       .then((result) => {
         if (result.signingIn === false) {
-          setAuthError("Sign in failed. Please try again.");
+          setAuthError(AUTH_CODE_NO_SESSION_MESSAGE);
         }
       })
       .catch((error) => {
@@ -82,10 +89,15 @@ export function AuthErrorHandler() {
 export function AppProviders({ children }: { children: React.ReactNode }) {
   return (
     <ConvexAuthProvider client={convex} shouldHandleCode={false}>
-      <AuthCodeHandler />
-      <AuthErrorHandler />
-      <UserBootstrap />
-      {children}
+      <TooltipProvider delayDuration={400}>
+        <AuthCodeHandler />
+        <AuthErrorHandler />
+        <UserBootstrap />
+        {children}
+        <ClientOnly>
+          <DevPersonaFab />
+        </ClientOnly>
+      </TooltipProvider>
     </ConvexAuthProvider>
   );
 }

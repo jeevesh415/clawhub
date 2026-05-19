@@ -1,11 +1,12 @@
-import { ConvexError } from "convex/values";
 import { normalizeTextContentType } from "clawhub-schema";
+import { ConvexError } from "convex/values";
 import semver from "semver";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { ActionCtx, MutationCtx } from "../_generated/server";
 import { getSkillBadgeMap, isSkillHighlighted } from "./badges";
 import { generateChangelogForPublish } from "./changelog";
+import { normalizeClawScanNoteForWrite } from "./clawScanNote";
 import { generateEmbedding } from "./embeddings";
 import { requireGitHubAccountAge } from "./githubAccount";
 import type { PublicUser } from "./public";
@@ -34,6 +35,7 @@ import {
   parseFrontmatter,
   sanitizePath,
 } from "./skills";
+import { assertValidSkillSlug, normalizeSkillSlug } from "./skillSlugValidator";
 import { generateSkillSummary } from "./skillSummary";
 import { runStaticPublishScan } from "./staticPublishScan";
 import type { WebhookSkillPayload } from "./webhooks";
@@ -52,8 +54,11 @@ export type PublishResult = {
 export type PublishVersionArgs = {
   slug: string;
   displayName: string;
+  /** Optional icon hint (e.g. `lucide:Plug`). Server validates the format. */
+  icon?: string;
   version: string;
   changelog: string;
+  clawScanNote?: string;
   tags?: string[];
   forkOf?: { slug: string; version?: string };
   source?: {
@@ -81,6 +86,11 @@ export type PublishOptions = {
   skipBackup?: boolean;
   skipWebhook?: boolean;
   ownerPublisherId?: Id<"publishers">;
+  // Explicit opt-in to owner migration. The `insertVersion` mutation refuses
+  // to rewrite a skill's `ownerPublisherId` unless this is `true`, so default
+  // publishes (including older CLIs that never pass this flag) can never
+  // accidentally transfer ownership.
+  migrateOwner?: boolean;
 };
 
 export async function publishVersionForUser(
@@ -90,12 +100,16 @@ export async function publishVersionForUser(
   options: PublishOptions = {},
 ): Promise<PublishResult> {
   const version = args.version.trim();
-  const slug = args.slug.trim().toLowerCase();
+  // Normalize first so we can look up the existing skill before deciding
+  // how strictly to validate. The reserved-word blocklist and length floor
+  // are only enforced for brand-new skills; owners of grandfathered slugs
+  // (reserved, <3 chars, or >48 chars) must still be able to publish new
+  // versions without being blocked by the write-path validator.
+  const normalizedSlug = normalizeSkillSlug(args.slug);
+  if (!normalizedSlug) throw new ConvexError("Slug is required.");
+
   const displayName = args.displayName.trim();
-  if (!slug || !displayName) throw new ConvexError("Slug and display name required");
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
-    throw new ConvexError("Slug must be lowercase and url-safe");
-  }
+  if (!displayName) throw new ConvexError("Display name required");
   if (!semver.valid(version)) {
     throw new ConvexError("Version must be valid semver");
   }
@@ -104,11 +118,21 @@ export async function publishVersionForUser(
     await requireGitHubAccountAge(ctx, userId);
   }
   const existingSkill = (await ctx.runQuery(internal.skills.getSkillBySlugInternal, {
-    slug,
+    slug: normalizedSlug,
   })) as Doc<"skills"> | null;
   const isNewSkill = !existingSkill;
 
+  // For new skills, enforce the full write-path rules (length, pattern,
+  // reserved-word blocklist). For existing skills the slug is already
+  // persisted and grandfathered — re-validating it would block legitimate
+  // version publishes on legacy rows.
+  if (isNewSkill) {
+    assertValidSkillSlug(normalizedSlug);
+  }
+  const slug = normalizedSlug;
+
   const suppliedChangelog = args.changelog.trim();
+  const clawScanNote = normalizeClawScanNoteForWrite(args.clawScanNote);
   const changelogSource = suppliedChangelog ? ("user" as const) : ("auto" as const);
 
   const sanitizedFiles = args.files.map((file) => ({
@@ -285,10 +309,13 @@ export async function publishVersionForUser(
   const publishResult = (await ctx.runMutation(internal.skills.insertVersion, {
     userId,
     ownerPublisherId: options.ownerPublisherId,
+    migrateOwner: options.migrateOwner,
     slug,
     displayName,
+    icon: args.icon,
     version,
     changelog: changelogText,
+    clawScanNote: clawScanNote || undefined,
     changelogSource,
     tags: args.tags?.map((tag) => tag.trim()).filter(Boolean),
     fingerprint,
@@ -329,11 +356,23 @@ export async function publishVersionForUser(
     versionId: publishResult.versionId,
   });
 
-  await ctx.scheduler.runAfter(0, internal.llmEval.evaluateWithLlm, {
+  await ctx.runMutation(internal.securityScan.enqueueSkillVersionScanInternal, {
+    versionId: publishResult.versionId,
+    source: "publish",
+  });
+
+  await ctx.scheduler.runAfter(0, internal.depRegistryScan.checkDependencyRegistries, {
     versionId: publishResult.versionId,
   });
 
-  const ownerHandle = owner?.handle ?? owner?.displayName ?? owner?.name ?? "unknown";
+  const targetPublisher =
+    options.ownerPublisherId !== undefined
+      ? ((await ctx.runQuery(internal.publishers.getByIdInternal, {
+          publisherId: options.ownerPublisherId,
+        })) as Doc<"publishers"> | null)
+      : null;
+  const ownerHandle =
+    targetPublisher?.handle ?? owner?.handle ?? owner?.displayName ?? owner?.name ?? "unknown";
 
   if (!options.skipBackup) {
     void ctx.scheduler

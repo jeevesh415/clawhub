@@ -10,6 +10,46 @@ export type PublicPublisher = Pick<
   "_id" | "_creationTime" | "kind" | "handle" | "displayName" | "image" | "bio" | "linkedUserId"
 >;
 
+type PublicPublisherStats = {
+  skills: number;
+  packages: number;
+  installs: number;
+  downloads: number;
+  stars: number;
+};
+
+export type PublicPublisherPublishedItem = {
+  kind: "skill" | "plugin";
+  displayName: string;
+  downloads: number;
+};
+
+export type PublicPublisherListItem = PublicPublisher & {
+  stats: PublicPublisherStats;
+  publishedItems: PublicPublisherPublishedItem[];
+  starredCount?: number;
+  affiliations?: Array<{
+    publisher: PublicPublisher;
+    role: "owner" | "admin" | "publisher";
+  }>;
+};
+
+export type PublicPublisherCatalogItem = {
+  _id: string;
+  kind: "skill" | "plugin";
+  displayName: string;
+  summary: string | null;
+  /**
+   * Skill custom-icon protocol string (e.g. `lucide:Plug`) mirrored from
+   * `skills.icon`. Always `null` for `kind: "plugin"` items in Phase 1.
+   */
+  icon: string | null;
+  href: string;
+  downloads: number;
+  stars: number;
+  updatedAt: number;
+};
+
 export type PublicSkill = Pick<
   Doc<"skills">,
   | "_id"
@@ -17,6 +57,7 @@ export type PublicSkill = Pick<
   | "slug"
   | "displayName"
   | "summary"
+  | "icon"
   | "ownerUserId"
   | "ownerPublisherId"
   | "canonicalSkillId"
@@ -26,6 +67,7 @@ export type PublicSkill = Pick<
   | "capabilityTags"
   | "badges"
   | "stats"
+  | "isSuspicious"
   | "createdAt"
   | "updatedAt"
 >;

@@ -47,7 +47,8 @@ const CRYPTO_PATTERNS = [
   /\bsolana\b/,
   /\baave\b/,
   /\btoken balance\b/,
-  /\bswap\b/,
+  /\b(?:defi|token|tokens|coin|coins|nft|nfts|usdc|eth|ethereum|erc20|crypto)\s+swaps?\b/,
+  /\bswaps?\s+(?:defi|token|tokens|coin|coins|nft|nfts|usdc|eth|ethereum|erc20|crypto)\b/,
   /\bbridge\b/,
   /\bliquidity\b/,
   /\bens\b/,
@@ -65,7 +66,8 @@ const WALLET_PATTERNS = [
 ] satisfies RegExp[];
 
 const PURCHASE_PATTERNS = [
-  /\bpay(?:ment|ments)?\b/,
+  /\bpayments?\b/,
+  /\bpay\s+(?:for|with|using|via|in)\b/,
   /\bpaid automatically\b/,
   /\bpay per call\b/,
   /\bmicro-?payments?\b/,
